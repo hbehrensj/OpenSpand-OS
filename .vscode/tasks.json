@@ -1,0 +1,16 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build menu.p",
+            "type": "zx81-bastop.convertbastop",
+            "file": "menu.bas",
+            "out": "menu.p",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}
