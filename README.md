@@ -15,25 +15,28 @@ DIR:/GAMES
  CHESS.P
  INVADERS.P
 ------------------------------
-7UP 6DN 0RUN 5BACK
+7UP 6DN 5,8PG 0RUN QQUIT
 ```
 
 ## Features
 
 - Scrollable list of files **and** folders — more than one screen, up to 100 entries per directory.
-- Subfolder navigation: enter a folder, use the `..` entry (or *back*) to go up.
+- Page up / down for fast travel through long directories.
+- Subfolder navigation: enter a folder, select the `..` entry to go up.
 - Live date & time from the OpenSpand RTC.
 - Atari‑style joystick (game port) **and** keyboard control, polled together.
-- Catalog reading, list rendering, and joystick decoding done in **Z80 machine code** for speed
-  (BASIC alone is far too slow for snappy scrolling / input on a 3.25 MHz ZX81).
+- Catalog reading, list rendering, **and the whole input poll** done in **Z80 machine code**
+  for speed (BASIC alone is far too slow for snappy scrolling / input on a 3.25 MHz ZX81).
 
 ## Controls
 
 | Action | Key / Joystick |
 |--------|----------------|
 | Move up / down | `7` / `6` (or stick up / down) |
-| Run program / enter folder | `0` or `8` (or fire) |
-| Back / up one level | `5` (or stick left), or select the `..` entry |
+| Page up / down | `5` / `8` (or stick left / right) |
+| Run program / enter folder | `0` (or fire) |
+| Up one level | select the `..` entry |
+| Quit launcher | `Q` |
 
 Works with an Atari‑compatible joystick on the OpenSpand game port, or with the
 keyboard. (When the joystick is in CONFIG‑J keyboard‑injection mode it can interfere
@@ -73,19 +76,11 @@ The interesting parts were all dictated by ZX81/OpenSpand quirks:
 - **List drawn straight to the display file (DFILE) in machine code.** `PRINT AT`
   costs ~60 ms per row (≈1 s for a full redraw); writing characters directly to
   screen memory is near‑instant.
-- **Joystick read + decoded in machine code.** The ZX81 floating‑point calculator is
-  slow, so the input decode is kept out of the BASIC loop entirely.
+- **Input poll done in machine code.** A single `WAITKEY` routine reads the raw joystick
+  *and* the keyboard matrix in one non‑blocking poll and returns a single direction code,
+  so the BASIC loop does almost no work per iteration — the ZX81 floating‑point calculator
+  never touches the hot path. Presses register instantly.
 - Everything — Z80 *and* BASIC — is produced by `build_menu.py`.
-
-## Known limitations / TODO
-
-- **Input is still a little sluggish** — you have to hold a direction/fire a touch
-  longer than you'd expect before it registers. The catalog read and list rendering
-  are machine code (fast), and the joystick decode was moved to machine code too, but
-  the idle/poll loop itself still runs in BASIC and the ZX81 floating‑point overhead
-  per iteration adds latency. **Next step:** move the whole poll/idle loop into machine
-  code (returning a direction on input, with a short timeout so the clock keeps
-  updating), so presses are caught instantly.
 
 ## Vibe‑coded
 

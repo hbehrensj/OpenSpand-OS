@@ -26,7 +26,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 
 Usage: python3 build_menu.py [--build]
 """
-SW=28; MAXE=100; V=17; BASE=16514
+SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -75,55 +75,240 @@ emit(0x22); ref("sptr")
 emit(0x4B); emit(0x06,0x00); emit(0xC9)
 lbl("GEEND")
 emit(0x01,0x00,0x00); emit(0xC9)
-# DRAWROW: compute DEST from RCELL, SRC from KCELL (MC multiplies, no BASIC divide)
-lbl("DRAWROW")
-emit(0x2A,0x0C,0x40); emit(0x23)        # LD HL,(16396); INC HL
-emit(0x3A); ref("RCELL")                # LD A,(RCELL)
-emit(0x11,33,0)                         # LD DE,33
-emit(0xA7); jr("Z","DRA1")
-emit(0x47)                              # LD B,A
-lbl("DRM1")
-emit(0x19); djnz("DRM1")                # ADD HL,DE ; DJNZ  -> HL=DEST
-lbl("DRA1")
-emit(0x3A); ref("MARK")                 # LD A,(MARK)
-emit(0x77); emit(0x23)                  # (HL)=A ; INC HL
-emit(0xE5)                              # PUSH HL  (name dest)
+# DRAWALL: render the whole visible window (V rows) to the DFILE in one call.
+# Reads T (top idx), S (selected idx), N (count) from RAM cells; V is baked in.
+# For each row K=T..T+V-1: if K<N draw marker (">"/space) + SW name bytes from
+# slot+K*SW; else blank the 29-char row. DEST base = (16396)+1+3*33 (screen row 3),
+# walks +33 per row; SRC walks +SW per drawn row. No firmware handshake, no IX.
+lbl("DRAWALL")
 emit(0x21); ref("slot")                 # LD HL,slot
-emit(0x11,SW,0)                         # LD DE,SW
-emit(0x3A); ref("KCELL")                # LD A,(KCELL)
-emit(0xA7); jr("Z","DRA2")
+emit(0x3A); ref("TCELL")                # LD A,(TCELL)   T
+emit(0xA7); jr("Z","DASRC")             # AND A; JR Z (T==0, skip multiply)
 emit(0x47)                              # LD B,A
-lbl("DRM2")
-emit(0x19); djnz("DRM2")                # HL=slot+K*SW = SRC
-lbl("DRA2")
+emit(0x11,SW,0)                         # LD DE,SW
+lbl("DAMUL")
+emit(0x19); djnz("DAMUL")               # ADD HL,DE; DJNZ -> HL=slot+T*SW
+lbl("DASRC")
 emit(0xEB)                              # EX DE,HL  (DE=SRC)
-emit(0xE1)                              # POP HL    (name dest)
+emit(0x2A,0x0C,0x40)                    # LD HL,(16396)
+emit(0xD5); emit(0x11,100,0); emit(0x19); emit(0xD1)  # PUSH DE;LD DE,100;ADD HL,DE;POP DE -> row3 dest
+emit(0x3A); ref("TCELL")                # LD A,(TCELL)
+emit(0x4F)                              # LD C,A   (K=T)
+emit(0x06,V)                            # LD B,V   (row counter)
+lbl("DALOOP")
+emit(0xE5)                              # PUSH HL  (row base)
+emit(0x3A); ref("NCELL")                # LD A,(NCELL)
+emit(0xB9)                              # CP C     (N-K)
+jr("Z","DABLK")                         # K==N -> blank
+jr("C","DABLK")                         # K>N  -> blank
+emit(0x3A); ref("SCELL")                # LD A,(SCELL)
+emit(0xB9)                              # CP C     (Z if selected)
+emit(0x3E,0x00)                         # LD A,0   (flags preserved)
+jr("NZ","DAMK")                         # not selected -> marker 0
+emit(0x3E,0x12)                         # LD A,18  (">")
+lbl("DAMK")
+emit(0x77); emit(0x23)                  # LD (HL),A; INC HL  (marker)
+emit(0xC5)                              # PUSH BC  (save rows+K)
 emit(0x06,SW)                           # LD B,SW
-lbl("DRC")
-emit(0x1A); emit(0x77); emit(0x13); emit(0x23); djnz("DRC")
+lbl("DACP")
+emit(0x1A); emit(0x13); emit(0x77); emit(0x23); djnz("DACP")  # copy SW name bytes (DE->HL)
+emit(0xC1)                              # POP BC
+jr(None,"DANXT")
+lbl("DABLK")
+emit(0xC5)                              # PUSH BC
+emit(0x06,SW+1)                         # LD B,SW+1 (marker+name = list width; leaves panel cols intact)
+emit(0xAF)                              # XOR A
+lbl("DABL")
+emit(0x77); emit(0x23); djnz("DABL")    # blank the row
+emit(0xC1)                              # POP BC
+lbl("DANXT")
+emit(0xE1)                              # POP HL  (row base)
+emit(0xD5); emit(0x11,33,0); emit(0x19); emit(0xD1)  # PUSH DE;LD DE,33;ADD HL,DE;POP DE -> next row
+emit(0x0C)                              # INC C  (K++)
+djnz("DALOOP")
 emit(0xC9)
-# POLLJOY: read raw joystick port (0xE007 subfn 0xA0), decode active-low, return
-# direction code in C (0=none,1=up,2=down,3=left,4=fire,5=right). Integer bit-test
-# in MC = instant; keeps the slow ZX81 float decode out of the BASIC loop.
-lbl("POLLJOY")
+# WAITKEY: one quick poll of the raw joystick (0xE007/0xA0) AND the keyboard matrix,
+# decoded in MC.  Returns a unified code in C:
+#   0=none 1=up 2=down 3=pageup 4=fire 5=pagedown 6=quit
+# Joystick: up/down move, left->pageup, right->pagedown, fire=run/enter.
+# Keyboard: 7=up 6=down 5=pageup 8=pagedown 0=fire Q=quit.
+# One non-blocking poll (short) -> no SLOW-mode screen blanking; keeps the slow
+# ZX81 float decode entirely out of the BASIC loop.
+lbl("WAITKEY")
 emit(0x01,0x07,0xE0); emit(0x3E,0xA0); emit(0xED,0x79)   # LD BC,0xE007; LD A,0xA0; OUT(C),A
-emit(0x01,0x07,0x00); emit(0xED,0x78)                    # LD BC,0x0007; IN A,(C)
-emit(0xCB,0x7F); jr("Z","PJU")                           # BIT 7,A; JR Z (up)
-emit(0xCB,0x77); jr("Z","PJD")                           # BIT 6,A
-emit(0xCB,0x6F); jr("Z","PJLF")                          # BIT 5,A
-emit(0xCB,0x67); jr("Z","PJRT")                          # BIT 4,A
-emit(0xCB,0x5F); jr("Z","PJFR")                          # BIT 3,A
+emit(0x01,0x07,0x00); emit(0xED,0x78)                    # LD BC,0x0007; IN A,(C)  raw joystick (active-low)
+emit(0xCB,0x7F); jr("Z","WKUP")                          # BIT7 up
+emit(0xCB,0x77); jr("Z","WKDN")                          # BIT6 down
+emit(0xCB,0x6F); jr("Z","WKPU")                          # BIT5 left -> pageup
+emit(0xCB,0x67); jr("Z","WKPD")                          # BIT4 right -> pagedown
+emit(0xCB,0x5F); jr("Z","WKFR")                          # BIT3 fire
+emit(0x01,0xFE,0xEF); emit(0xED,0x78)                    # LD BC,0xEFFE; IN A,(C)  keys 0,9,8,7,6
+emit(0xCB,0x5F); jr("Z","WKUP")                          # bit3=key7 up
+emit(0xCB,0x67); jr("Z","WKDN")                          # bit4=key6 down
+emit(0xCB,0x57); jr("Z","WKPD")                          # bit2=key8 pagedown
+emit(0xCB,0x47); jr("Z","WKFR")                          # bit0=key0 fire
+emit(0x01,0xFE,0xF7); emit(0xED,0x78)                    # LD BC,0xF7FE; IN A,(C)  keys 1,2,3,4,5
+emit(0xCB,0x67); jr("Z","WKPU")                          # bit4=key5 pageup
+emit(0x01,0xFE,0xFB); emit(0xED,0x78)                    # LD BC,0xFBFE; IN A,(C)  keys Q,W,E,R,T
+emit(0xCB,0x47); jr("Z","WKQT")                          # bit0=keyQ quit
+emit(0x01,0xFE,0xFE); emit(0xED,0x78)                    # LD BC,0xFEFE; IN A,(C)  keys SHIFT,Z,X,C,V
+emit(0xCB,0x5F); jr("Z","WKCFG")                         # bit3=key C -> config edit
 emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)             # none
-lbl("PJU"); emit(0x0E,0x01); emit(0x06,0x00); emit(0xC9)
-lbl("PJD"); emit(0x0E,0x02); emit(0x06,0x00); emit(0xC9)
-lbl("PJLF"); emit(0x0E,0x03); emit(0x06,0x00); emit(0xC9)
-lbl("PJRT"); emit(0x0E,0x05); emit(0x06,0x00); emit(0xC9)
-lbl("PJFR"); emit(0x0E,0x04); emit(0x06,0x00); emit(0xC9)
+lbl("WKUP"); emit(0x0E,0x01); emit(0x06,0x00); emit(0xC9)
+lbl("WKDN"); emit(0x0E,0x02); emit(0x06,0x00); emit(0xC9)
+lbl("WKPU"); emit(0x0E,0x03); emit(0x06,0x00); emit(0xC9)
+lbl("WKFR"); emit(0x0E,0x04); emit(0x06,0x00); emit(0xC9)
+lbl("WKPD"); emit(0x0E,0x05); emit(0x06,0x00); emit(0xC9)
+lbl("WKQT"); emit(0x0E,0x06); emit(0x06,0x00); emit(0xC9)
+lbl("WKCFG"); emit(0x0E,0x07); emit(0x06,0x00); emit(0xC9)
+# PANELMC: blit the PR x PW panel buffer (pbuf) to the DFILE at screen rows 3..,
+# cols PCOL.. (DEST=(16396)+1+3*33+PCOL = +100+PCOL, walks +33 per row). Straight
+# copy (DE=SRC walks pbuf continuously). Replaces ~9 slow PRINT AT per panel update.
+lbl("PANELMC")
+emit(0x11); ref("pbuf")                                 # LD DE,pbuf (SRC)
+emit(0x2A,0x0C,0x40)                                    # LD HL,(16396)
+emit(0xD5); emit(0x11,(100+PCOL)&0xFF,((100+PCOL)>>8)&0xFF); emit(0x19); emit(0xD1)  # HL=row3 colPCOL
+emit(0x06,PR)                                           # LD B,PR (rows)
+lbl("PMROW")
+emit(0xC5); emit(0xE5)                                  # PUSH BC; PUSH HL
+emit(0x06,PW)                                           # LD B,PW
+lbl("PMCOL")
+emit(0x1A); emit(0x13); emit(0x77); emit(0x23); djnz("PMCOL")  # copy PW bytes DE->HL
+emit(0xE1)                                              # POP HL (row base)
+emit(0xD5); emit(0x11,33,0); emit(0x19); emit(0xD1)     # next row (preserve DE/SRC)
+emit(0xC1)                                              # POP BC
+djnz("PMROW")
+emit(0xC9)
+# PANELCLR: fill the same panel region with spaces (folders / no selection).
+lbl("PANELCLR")
+emit(0x2A,0x0C,0x40)                                    # LD HL,(16396)
+emit(0x11,(100+PCOL)&0xFF,((100+PCOL)>>8)&0xFF); emit(0x19)  # HL=row3 colPCOL
+emit(0x06,PR)                                           # LD B,PR
+lbl("PCROW")
+emit(0xC5); emit(0xE5)                                  # PUSH BC; PUSH HL
+emit(0x06,PW); emit(0xAF)                               # LD B,PW; XOR A
+lbl("PCCOL")
+emit(0x77); emit(0x23); djnz("PCCOL")                   # LD (HL),0; INC HL; DJNZ
+emit(0xE1)                                              # POP HL
+emit(0x11,33,0); emit(0x19)                             # LD DE,33; ADD HL,DE
+emit(0xC1)                                              # POP BC
+djnz("PCROW")
+emit(0xC9)
+# NAV: machine-code navigation loop body. CALL WAITKEY, then for up/down/page it
+# updates S/T (SCELL/TCELL) and redraws (CALL DRAWALL) entirely in MC, throttled by
+# the RPT counter. Returns C: 8=navigated (BASIC just loops), 0=idle, 4/6/7=
+# fire/quit/config for BASIC. Kills the ~15 interpreted statements per move.
+lbl("NAV")
+emit(0xCD); ref("WAITKEY")              # CALL WAITKEY -> C=code, B=0
+emit(0x79)                              # LD A,C
+emit(0xFE,0x04); jr("Z","NAVACT")       # 4 fire -> action
+emit(0xFE,0x06); jr("NC","NAVACT")      # >=6 quit/config -> action
+emit(0xAF); emit(0x32); ref("ACTDN")    # not an action: clear ACTDN (release)
+emit(0x79); emit(0xA7); jr("Z","NAVIDLE")   # LD A,C; AND A; 0 -> idle
+jr(None,"NAV3")                         # 1,2,3,5 -> navigation
+lbl("NAVACT")                           # action key (4/6/7): edge-detect (debounce)
+emit(0x3A); ref("ACTDN")                # LD A,(ACTDN)
+emit(0xA7); jr("NZ","NAVZ0")            # already down -> return 0 (ignore repeat)
+emit(0x3E,0x01); emit(0x32); ref("ACTDN")   # LD A,1; LD (ACTDN),A
+emit(0xC9)                              # edge: RET with code in C (4/6/7), B=0
+lbl("NAVZ0")
+emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)   # LD C,0; LD B,0; RET
+lbl("NAVIDLE")                          # nothing pressed
+emit(0xAF); emit(0x32); ref("RPT")      # XOR A; LD (RPT),A (reset repeat)
+emit(0x3A); ref("IDLECNT")              # LD A,(IDLECNT)
+emit(0x3C)                              # INC A
+emit(0xFE,HKDIV); jr("C","NAVIDL2")     # CP HKDIV; < HKDIV -> keep counting
+emit(0xAF); emit(0x32); ref("IDLECNT")  # reached HKDIV: reset counter
+emit(0x0E,0x09); emit(0x06,0x00); emit(0xC9)   # LD C,9; LD B,0; RET (housekeeping tick)
+lbl("NAVIDL2")
+emit(0x32); ref("IDLECNT")              # store incremented count
+emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)   # LD C,0; LD B,0; RET (idle)
+lbl("NAV3")
+emit(0x3A); ref("RPT")                  # LD A,(RPT)  repeat throttle
+emit(0xA7); jr("Z","NAVMOVE")           # RPT==0 -> move now
+emit(0x3D); emit(0x32); ref("RPT")      # DEC A; LD (RPT),A
+emit(0x0E,0x08); emit(0x06,0x00); emit(0xC9)   # throttled tick: C=8; B=0; RET
+lbl("NAVMOVE")
+emit(0x3E,RPTN); emit(0x32); ref("RPT") # LD A,RPTN; LD (RPT),A
+emit(0x79)                              # LD A,C
+emit(0xFE,0x01); jr("Z","NAVUP")
+emit(0xFE,0x02); jr("Z","NAVDN")
+emit(0xFE,0x03); jr("Z","NAVPU")
+jr(None,"NAVPD")                        # code 5 = pagedown
+lbl("NAVUP")
+emit(0x3A); ref("SCELL")                # LD A,(SCELL)
+emit(0xA7); jr("Z","NAVR8")             # S==0 -> no move
+emit(0x3D); emit(0x32); ref("SCELL")    # DEC A; LD (SCELL),A  (S=S-1)
+emit(0x21); ref("TCELL")                # LD HL,TCELL
+emit(0xBE); jr("NC","NAVDRAW")          # CP (HL): if newS>=T no scroll
+emit(0x77)                              # LD (HL),A : T=newS
+jr(None,"NAVDRAW")
+lbl("NAVDN")
+emit(0x3A); ref("NCELL")                # LD A,(NCELL)
+emit(0xA7); jr("Z","NAVR8")             # N==0 -> no move
+emit(0x3D)                              # DEC A (N-1)
+emit(0x21); ref("SCELL")                # LD HL,SCELL
+emit(0xBE); jr("C","NAVR8")             # (N-1)<S safety
+jr("Z","NAVR8")                         # S==N-1 -> bottom
+emit(0x3A); ref("SCELL")                # LD A,(SCELL)
+emit(0x3C); emit(0x32); ref("SCELL")    # INC A; LD (SCELL),A  (S=S+1)
+emit(0x47)                              # LD B,A (newS)
+emit(0x3A); ref("TCELL")                # LD A,(TCELL)
+emit(0xC6,V-1)                          # ADD A,V-1  (T+V-1)
+emit(0xB8); jr("NC","NAVDRAW")          # CP B: if T+V-1>=newS no scroll
+emit(0x78); emit(0xD6,V-1)              # LD A,B; SUB V-1  (newS-V+1)
+emit(0x32); ref("TCELL")                # LD (TCELL),A
+jr(None,"NAVDRAW")
+lbl("NAVPU")
+emit(0x3A); ref("TCELL")                # LD A,(TCELL)
+emit(0xD6,V); jr("NC","NAVPU2")         # SUB V
+emit(0xAF)                              # XOR A (clamp 0)
+lbl("NAVPU2")
+emit(0x32); ref("TCELL")                # LD (TCELL),A
+emit(0x32); ref("SCELL")                # LD (SCELL),A  (S=T)
+jr(None,"NAVDRAW")
+lbl("NAVPD")
+emit(0x3A); ref("TCELL")                # LD A,(TCELL)
+emit(0xC6,V); emit(0x47)                # ADD A,V; LD B,A  (candidate=T+V)
+emit(0x3A); ref("NCELL")                # LD A,(NCELL)
+emit(0xD6,V); jr("NC","NAVPD2")         # SUB V  (cap=N-V)
+emit(0xAF)                              # XOR A (clamp 0)
+lbl("NAVPD2")
+emit(0xB8); jr("NC","NAVPD3")           # CP B: if cap>=candidate use candidate
+jr(None,"NAVPD4")                       # cap<candidate -> T=cap (A=cap)
+lbl("NAVPD3")
+emit(0x78)                              # LD A,B (candidate)
+lbl("NAVPD4")
+emit(0x32); ref("TCELL")                # LD (TCELL),A
+emit(0x32); ref("SCELL")                # LD (SCELL),A  (S=T)
+lbl("NAVDRAW")
+emit(0xCD); ref("DRAWALL")              # CALL DRAWALL (redraw list with new S/T)
+lbl("NAVR8")
+emit(0x0E,0x08); emit(0x06,0x00); emit(0xC9)   # LD C,8; LD B,0; RET (navigated)
 # data
 lbl("sptr"); emit(0,0)
-lbl("RCELL"); emit(0)
-lbl("KCELL"); emit(0)
-lbl("MARK"); emit(0)
+lbl("TCELL"); emit(0)
+lbl("SCELL"); emit(0)
+lbl("NCELL"); emit(0)
+lbl("RPT"); emit(0)
+lbl("ACTDN"); emit(0)
+lbl("IDLECNT"); emit(0)
+lbl("cfgbuf")
+for _ in range(16): emit(0)
+# panel render buffer (PR rows x PW cols), pre-filled with the static labels.
+# BASIC pokes only the dynamic value bytes (offsets below), then PANELMC blits it.
+def zc(ch):
+    if ch==" ": return 0
+    return {".":27,"=":20,">":18,"/":24,"-":22,",":26}.get(ch,
+        28+ord(ch)-48 if "0"<=ch<="9" else 38+ord(ch)-65)
+pbuf_init=[0]*(PR*PW)
+def pput(pr,col,s):
+    for i,ch in enumerate(s): pbuf_init[pr*PW+col+i]=zc(ch)
+pput(0,0,"OS CONFIG")
+pput(2,1,"UP");  pput(3,1,"DOWN"); pput(4,1,"LEFT"); pput(5,1,"RIGHT"); pput(6,1,"FIRE")
+pput(8,1,"CFG"); pput(9,1,"RUN");  pput(11,0,"C=EDIT")
+lbl("pbuf")
+for b in pbuf_init: emit(b)
 lbl("bufA")
 for _ in range(24): emit(0)
 lbl("slot")
@@ -136,216 +321,295 @@ for i,(t,v) in enumerate(prog):
     elif t=="hi": out[i]=(addr(v)>>8)&0xFF
     elif t=="jr":
         e=labels[v]-(i+1); assert -128<=e<=127,(v,e); out[i]=e&0xFF
-assert not any(out[i]==0x76 for i in range(codelen)),"0x76 in code"
-A=addr("OPEN");G=addr("GET");DRW=addr("DRAWROW");PJ=addr("POLLJOY")
-SPTR=addr("sptr");RCELL=addr("RCELL");KCELL=addr("KCELL");MARK=addr("MARK")
-BA=addr("bufA");SLOT=addr("slot")
+assert not any(out[i]==0x76 for i in range(len(out))),"0x76 in REM"
+A=addr("OPEN");G=addr("GET");DA=addr("DRAWALL");WK=addr("WAITKEY")
+SPTR=addr("sptr");TC=addr("TCELL");SC=addr("SCELL");NC=addr("NCELL")
+CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
+PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
 rem="".join("[%d]"%b for b in out)
 GO=["XXX","X X","X X","X X","XXX"];GS=["XXX","X  ","XXX","  X","XXX"]
 logo=[GO[r]+" "+GS[r]+" "+GO[r]+" "+GS[r] for r in range(5)]
 def blocks(s): return "".join("[128]" if c=="X" else " " for c in s)
-L=[]
-def add(s): L.append(s)
-add("#!basic-start=10")
-add("# OPENSPAND OS LAUNCHER - generated by build_menu.py, do not hand-edit.")
-add("# MC OPEN=%d GETSLOT=%d DRAWROW=%d sptr=%d R=%d K=%d MARK=%d slot=%d"%(A,G,DRW,SPTR,RCELL,KCELL,MARK,SLOT))
-add("1 REM "+rem)
-add("10 POKE 16,251")
-add("11 LET V=%d"%V)
-add('13 LET B$=""')
-add("14 FOR I=1 TO 32")
-add('15 LET B$=B$+" "')
-add("16 NEXT I")
-add('17 LET Y$=""')
-add("18 FOR I=1 TO 30")
-add('19 LET Y$=Y$+"-"')
-add("20 NEXT I")
-add('21 LET Q$="/"')
-add("22 LET P=0")
-add("23 LET S=0")
-add("24 LET T=0")
-add("25 LET O=0")
-add("26 LET L=0")
-add("27 LET W=0")
-add("30 CLS")
-ln=31
+# --- BASIC emitter: statements carry no line numbers; mark a jump target with
+# LBL("NAME") and reference it as @NAME. The two passes at the end assign line
+# numbers (line 1 stays the REM so the MC stays at 16514) and resolve @NAME. ---
+import re as _re
+basic=[]
+def B(s): basic.append(("L",s))
+def LBL(n): basic.append(("@",n))
+# Startup: splash FIRST (instant), then build helper strings / init the vars.
+B("POKE 16,251")
+B("CLS")
 for idx,row in enumerate(logo):
-    add('%d PRINT AT %d,8;"%s"'%(ln,3+idx,blocks(row))); ln+=1
-add('%d PRINT AT 9,3;"OPENSPAND OPERATING SYSTEM"'%ln); ln+=1
-add("%d GOSUB 200"%ln); ln+=1
-add("%d GOSUB 700"%ln); ln+=1
-add("%d GOTO 300"%ln); ln+=1
-assert ln<=199
-add("200 POKE %d,0"%BA)
-add("201 LET X=USR %d"%A)
-add("202 IF P=0 THEN GOTO 209")
-add("203 POKE %d,27"%SLOT)
-add("204 POKE %d,27"%(SLOT+1))
-add("205 FOR I=2 TO %d"%(SW-1))
-add("206 POKE %d+I,0"%SLOT)
-add("207 NEXT I")
-add("209 LET N=P>0")
-add("210 LET SA=%d+%d*N"%(SLOT,SW))
-add("211 POKE %d,SA-256*INT (SA/256)"%SPTR)
-add("212 POKE %d,INT (SA/256)"%(SPTR+1))
-add("213 LET M=USR %d"%G)
-add("214 IF M=0 THEN GOTO 220")
-add("215 LET N=N+1")
-add("216 IF N>%d THEN GOTO 220"%MAXE)
-add("217 GOTO 213")
-add("220 RETURN")
-add("250 POKE %d,18"%BA)
-add("251 FOR I=1 TO LEN N$")
-add("252 POKE %d+I,CODE N$(I)"%BA)
-add("253 NEXT I")
-add("254 POKE %d+LEN N$+1,0"%BA)
-add("255 LET X=USR %d"%A)
-add("256 RETURN")
-add('270 LET N$=""')
-add("271 LET D=0")
-add("272 LET SA=%d+%d*S"%(SLOT,SW))
-add("273 FOR I=0 TO %d"%(SW-1))
-add("274 LET C=PEEK (SA+I)")
-add("275 IF C=0 THEN GOTO 279")
-add("276 LET N$=N$+CHR$ C")
-add("277 LET D=D+1")
-add("278 NEXT I")
-add("279 RETURN")
-add("280 LET R=3+K-T")
-add("281 IF R<3 THEN RETURN")
-add("282 IF R>19 THEN RETURN")
-add("283 IF K>=N THEN GOTO 293")
-add("284 POKE %d,R"%RCELL)
-add("285 POKE %d,K"%KCELL)
-add("286 POKE %d,(K=S)*18"%MARK)
-add("287 LET X=USR %d"%DRW)
-add("288 RETURN")
-add("293 PRINT AT R,0;B$( TO 29)")
-add("294 RETURN")
-add("295 FOR K=T TO T+V-1")
-add("296 GOSUB 280")
-add("297 NEXT K")
-add("298 RETURN")
-add("300 LET K=USR %d"%PJ)
-add("301 IF K>0 THEN GOTO 330")
-add("302 LET K$=INKEY$")
-add('303 IF K$="" THEN GOTO 310')
-add('304 IF K$="7" THEN LET K=1')
-add('305 IF K$="6" THEN LET K=2')
-add('306 IF K$="5" THEN LET K=3')
-add('307 IF K$="0" THEN LET K=4')
-add('308 IF K$="8" THEN LET K=5')
-add("309 IF K>0 THEN GOTO 330")
-add("310 LET O=0")
-add("311 LET L=0")
-add("312 LET W=W+1")
-add("313 IF W<150 THEN GOTO 300")
-add("314 LET W=0")
-add("315 GOSUB 9100")
-add("316 PRINT AT 0,24;M$")
-add("317 GOTO 300")
-add("330 IF K=1 THEN GOTO 340")
-add("331 IF K=2 THEN GOTO 350")
-add("332 IF K=3 THEN GOTO 360")
-add("333 IF K=4 THEN GOTO 370")
-add("334 GOTO 370")
-add("340 IF S<=0 THEN GOTO 300")
-add("341 LET X=S")
-add("342 LET S=S-1")
-add("343 GOSUB 600")
-add("344 GOSUB 800")
-add("345 GOTO 300")
-add("350 IF S>=N-1 THEN GOTO 300")
-add("351 LET X=S")
-add("352 LET S=S+1")
-add("353 GOSUB 600")
-add("354 GOSUB 800")
-add("355 GOTO 300")
-add("360 IF L=1 THEN GOTO 300")
-add("361 LET L=1")
-add("362 GOSUB 500")
-add("363 GOTO 300")
-add("370 IF O=1 THEN GOTO 300")
-add("371 LET O=1")
-add("372 GOSUB 900")
-add("373 GOTO 300")
-add("500 IF P=0 THEN RETURN")
-add('501 LET N$=".."')
-add("502 GOSUB 250")
-add("503 LET P=P-1")
-add("504 LET Q$=Q$( TO LEN Q$-1)")
-add("505 LET J=0")
-add("506 FOR I=1 TO LEN Q$")
-add('507 IF Q$(I)="/" THEN LET J=I')
-add("508 NEXT I")
-add("509 LET Q$=Q$( TO J)")
-add("510 LET S=0")
-add("511 LET T=0")
-add("512 GOSUB 200")
-add("513 GOSUB 700")
-add("514 RETURN")
-add("600 IF S<T THEN GOTO 620")
-add("601 IF S>T+V-1 THEN GOTO 620")
-add("602 LET K=X")
-add("603 GOSUB 280")
-add("604 LET K=S")
-add("605 GOSUB 280")
-add("606 RETURN")
-add("620 IF S<T THEN LET T=S")
-add("621 IF S>T+V-1 THEN LET T=S-V+1")
-add("622 GOSUB 295")
-add("623 RETURN")
-add("700 CLS")
-add('701 PRINT AT 0,0;"OPENSPAND OS"')
-add("702 GOSUB 9000")
-add("703 PRINT AT 0,13;D$")
-add("704 PRINT AT 0,24;M$")
-add('705 PRINT AT 1,0;"DIR:";Q$')
-add("706 PRINT AT 2,0;Y$")
-add("707 PRINT AT 20,0;Y$")
-add('708 PRINT AT 21,0;"7UP 6DN 0RUN 5BACK";')
-add("709 GOSUB 295")
-add("710 RETURN")
-add("800 FOR I=1 TO 3")
-add("801 NEXT I")
-add("802 RETURN")
-add("900 IF N=0 THEN RETURN")
-add("901 GOSUB 270")
-add("902 IF D=0 THEN RETURN")
-add('903 IF N$=".." THEN GOTO 930')
-add('904 IF N$(D)="/" THEN GOTO 920')
-add('905 PRINT AT 21,0;"LOADING ";N$;B$( TO 8);')
-add("906 LOAD N$")
-add("907 RETURN")
-add("920 LET N$=N$( TO D-1)")
-add('921 LET Q$=Q$+N$+"/"')
-add("922 GOSUB 250")
-add("923 LET P=P+1")
-add("924 LET S=0")
-add("925 LET T=0")
-add("926 GOSUB 200")
-add("927 GOSUB 700")
-add("928 RETURN")
-add("930 GOSUB 500")
-add("931 RETURN")
-add('9000 LPRINT "GET DAT"')
-add('9001 LET D$=""')
-add("9002 FOR I=0 TO 9")
-add("9003 LET D$=D$+CHR$ PEEK (16449+I)")
-add("9004 NEXT I")
-add("9005 GOSUB 9100")
-add("9006 RETURN")
-add('9100 LPRINT "GET TIM"')
-add('9101 LET M$=""')
-add("9102 FOR I=0 TO 7")
-add("9103 LET M$=M$+CHR$ PEEK (16449+I)")
-add("9104 NEXT I")
-add("9105 RETURN")
+    B('PRINT AT %d,8;"%s"'%(3+idx,blocks(row)))
+B('PRINT AT 9,3;"OPENSPAND OPERATING SYSTEM"')
+for stmt in ['LET V=%d'%V,'LET B$=""','FOR I=1 TO 32','LET B$=B$+" "','NEXT I',
+             'LET Y$=""','FOR I=1 TO 30','LET Y$=Y$+"-"','NEXT I',
+             'LET Q$="/"','LET P=0','POKE %d,0'%SC,'POKE %d,0'%TC,'LET O=0','LET L=0','LET W=0',
+             'LET PD=0']:
+    B(stmt)
+B("GOSUB @LISTDIR")
+B("GOSUB @REDRAW")
+B("GOTO @MAINLOOP")
+# LISTDIR: read the current directory into the slot buffer (one GETSLOT per entry).
+LBL("LISTDIR")
+B('PRINT AT 1,0;"READING SD CARD...";')
+B("POKE %d,0"%BA)
+B("LET X=USR %d"%A)
+B("IF P=0 THEN GOTO @LISTN")
+B("POKE %d,27"%SLOT)
+B("POKE %d,27"%(SLOT+1))
+B("FOR I=2 TO %d"%(SW-1))
+B("POKE %d+I,0"%SLOT)
+B("NEXT I")
+LBL("LISTN")
+B("LET N=P>0")
+LBL("GETLOOP")
+B("LET SA=%d+%d*N"%(SLOT,SW))
+B("POKE %d,SA-256*INT (SA/256)"%SPTR)
+B("POKE %d,INT (SA/256)"%(SPTR+1))
+B("LET M=USR %d"%G)
+B("IF M=0 THEN GOTO @LISTDONE")
+B("IF M<2 THEN GOTO @KEEP")
+B("IF PEEK (SA+M-2)<>27 THEN GOTO @KEEP")
+B("IF PEEK (SA+M-1)<>40 THEN GOTO @KEEP")
+B("GOTO @GETLOOP")
+LBL("KEEP")
+B("LET N=N+1")
+B("IF N>%d THEN GOTO @LISTDONE"%MAXE)
+B("GOTO @GETLOOP")
+LBL("LISTDONE")
+B("RETURN")
+# CHDIR: chdir to ('>'+N$) via OPEN (N$ holds the leading '>').
+LBL("CHDIR")
+B("POKE %d,18"%BA)
+B("FOR I=1 TO LEN N$")
+B("POKE %d+I,CODE N$(I)"%BA)
+B("NEXT I")
+B("POKE %d+LEN N$+1,0"%BA)
+B("LET X=USR %d"%A)
+B("RETURN")
+# READSEL: read the selected slot S into N$ (len D).
+LBL("READSEL")
+B('LET N$=""')
+B("LET D=0")
+B("LET SA=%d+%d*PEEK (%d)"%(SLOT,SW,SC))
+B("FOR I=0 TO %d"%(SW-1))
+B("LET C=PEEK (SA+I)")
+B("IF C=0 THEN GOTO @READSELDONE")
+B("LET N$=N$+CHR$ C")
+B("LET D=D+1")
+B("NEXT I")
+LBL("READSELDONE")
+B("RETURN")
+# DRAW: render the whole visible window via DRAWALL (cols 0..SW; panel cols PCOL+ untouched).
+LBL("DRAW")
+B("POKE %d,N"%NC)
+B("LET X=USR %d"%DA)
+B("RETURN")
+# cfgbuf layout: [0]=magic 211, [1..5]=joystick key char codes (up,down,left,right,fire).
+# Config is loaded ONLY when editing (C) or launching - never while browsing.
+# CFGNAME: build the config file base name C$ from the selected game N$ (".P"->".C").
+LBL("CFGNAME")
+B('LET C$=N$( TO D-1)+"C"')
+B("RETURN")
+# CFGLOAD: load NAME.C into cfgbuf; CV=1 if it existed, else CV=0 + default keys 7/6/5/8/0.
+LBL("CFGLOAD")
+B("GOSUB @CFGNAME")
+B('LET F$=C$+";"+STR$ %d'%CFGB)
+B("POKE %d,0"%CFGB)
+B("LOAD F$")
+B("LET CV=1")
+B("IF PEEK (%d)=212 THEN RETURN"%CFGB)
+B("LET CV=0")
+B("POKE %d,212"%CFGB)
+B("POKE %d,35"%(CFGB+1))
+B("POKE %d,34"%(CFGB+2))
+B("POKE %d,33"%(CFGB+3))
+B("POKE %d,36"%(CFGB+4))
+B("POKE %d,28"%(CFGB+5))
+B("RETURN")
+# CFGSAVE: write the 6-byte cfgbuf (magic + 5 keys) to NAME.C (overwrite).
+LBL("CFGSAVE")
+B("POKE %d,212"%CFGB)
+B("GOSUB @CFGNAME")
+B('LET F$=">"+C$+";"+STR$ %d+",6"'%CFGB)
+B("SAVE F$")
+B("RETURN")
+# CFGAPPLY: if a saved config exists, issue CONFIG "J=<5 keys>" (LLIST token) before LOAD.
+LBL("CFGAPPLY")
+B("IF CV=0 THEN RETURN")
+B('LET G$="J="')
+B("FOR I=1 TO 5")
+B("LET G$=G$+CHR$ PEEK (%d+I)"%CFGB)
+B("NEXT I")
+B("LLIST G$")
+B("RETURN")
+# GETKEY: wait for key release, then a fresh press; return its code in KC.
+LBL("GETKEY")
+B('IF INKEY$<>"" THEN GOTO @GETKEY')
+LBL("GETKEY2")
+B("LET G$=INKEY$")
+B('IF G$="" THEN GOTO @GETKEY2')
+B("LET KC=CODE G$")
+B("RETURN")
+# CFGEDIT (C key): prompt the user to press a key for each joystick direction, then save.
+LBL("CFGEDIT")
+B("GOSUB @READSEL")
+B("IF N=0 THEN GOTO @MAINLOOP")
+B('IF N$=".." THEN GOTO @MAINLOOP')
+B('IF N$(D)="/" THEN GOTO @MAINLOOP')
+B("GOSUB @CFGLOAD")
+B("FOR I=3 TO 14")
+B("PRINT AT I,%d;B$( TO 15)"%PCOL)
+B("NEXT I")
+B('PRINT AT 3,%d;"SET KEYS"'%PCOL)
+B('PRINT AT 5,%d;"UP"'%PCOL)
+B('PRINT AT 6,%d;"DOWN"'%PCOL)
+B('PRINT AT 7,%d;"LEFT"'%PCOL)
+B('PRINT AT 8,%d;"RIGHT"'%PCOL)
+B('PRINT AT 9,%d;"FIRE"'%PCOL)
+B("LET F=1")
+LBL("EDPR")
+B('PRINT AT 11,%d;"PRESS KEY"'%PCOL)
+B('IF F=1 THEN PRINT AT 12,%d;"FOR UP   "'%PCOL)
+B('IF F=2 THEN PRINT AT 12,%d;"FOR DOWN "'%PCOL)
+B('IF F=3 THEN PRINT AT 12,%d;"FOR LEFT "'%PCOL)
+B('IF F=4 THEN PRINT AT 12,%d;"FOR RIGHT"'%PCOL)
+B('IF F=5 THEN PRINT AT 12,%d;"FOR FIRE "'%PCOL)
+B("GOSUB @GETKEY")
+B("POKE %d+F,KC"%CFGB)
+B("PRINT AT 4+F,%d;CHR$ KC"%(PCOL+6))
+B("LET F=F+1")
+B("IF F<=5 THEN GOTO @EDPR")
+B("GOSUB @CFGSAVE")
+B("GOSUB @REDRAW")
+B("GOTO @MAINLOOP")
+# MAINLOOP: poll input (WAITKEY), dispatch, idle = throttled clock refresh.
+LBL("MAINLOOP")
+B("LET K=USR %d"%NAVA)
+B("IF K=0 THEN GOTO @MAINLOOP")
+B("IF K=8 THEN GOTO @MAINLOOP")
+B("IF K=9 THEN GOTO @HOUSE")
+B("IF K=4 THEN GOTO @FIRE")
+B("IF K=6 THEN GOTO @QUIT")
+B("IF K=7 THEN GOTO @CFGEDIT")
+B("GOTO @MAINLOOP")
+LBL("HOUSE")
+B("GOSUB @GETTIME")
+B("PRINT AT 0,24;M$")
+B("GOTO @MAINLOOP")
+LBL("FIRE")
+B("GOSUB @ACTIVATE")
+B("GOTO @MAINLOOP")
+LBL("QUIT")
+B("CLS")
+B("STOP")
+# GOUP: go up one directory level (chdir '..', pop path).
+LBL("GOUP")
+B("IF P=0 THEN RETURN")
+B('LET N$=".."')
+B("GOSUB @CHDIR")
+B("LET P=P-1")
+B("LET Q$=Q$( TO LEN Q$-1)")
+B("LET J=0")
+B("FOR I=1 TO LEN Q$")
+B('IF Q$(I)="/" THEN LET J=I')
+B("NEXT I")
+B("LET Q$=Q$( TO J)")
+B("POKE %d,0"%SC)
+B("POKE %d,0"%TC)
+B("GOSUB @LISTDIR")
+B("GOSUB @REDRAW")
+B("RETURN")
+# REDRAW: full screen (header + separators + footer + list).
+LBL("REDRAW")
+B("CLS")
+B('PRINT AT 0,0;"OPENSPAND OS"')
+B("GOSUB @GETDATE")
+B("PRINT AT 0,13;D$")
+B("PRINT AT 0,24;M$")
+B('PRINT AT 1,0;"DIR:";Q$')
+B("PRINT AT 2,0;Y$")
+B("PRINT AT 20,0;Y$")
+B('PRINT AT 21,0;"7UP 6DN 5,8PG 0RUN C=KEY Q=X";')
+B("GOSUB @DRAW")
+B('PRINT AT 3,%d;"CONFIG"'%PCOL)
+B('PRINT AT 5,%d;"C=SET KEYS"'%PCOL)
+B("RETURN")
+# DELAY: short key-repeat throttle.
+LBL("DELAY")
+B("FOR I=1 TO 3")
+B("NEXT I")
+B("RETURN")
+# ACTIVATE: fire on the selected entry - run file / enter dir / go up.
+LBL("ACTIVATE")
+B("IF N=0 THEN RETURN")
+B("GOSUB @READSEL")
+B("IF D=0 THEN RETURN")
+B('IF N$=".." THEN GOTO @DOUP')
+B('IF N$(D)="/" THEN GOTO @CHDIRIN')
+B("GOSUB @CFGLOAD")
+B("GOSUB @CFGAPPLY")
+B('PRINT AT 21,0;"LOADING ";N$;B$( TO 8);')
+B("LOAD N$")
+B("RETURN")
+LBL("CHDIRIN")
+B("LET N$=N$( TO D-1)")
+B('LET Q$=Q$+N$+"/"')
+B("GOSUB @CHDIR")
+B("LET P=P+1")
+B("POKE %d,0"%SC)
+B("POKE %d,0"%TC)
+B("GOSUB @LISTDIR")
+B("GOSUB @REDRAW")
+B("RETURN")
+LBL("DOUP")
+B("GOSUB @GOUP")
+B("RETURN")
+# GETDATE/GETTIME: read the RTC into D$/M$ from the IO buffer at 16449.
+LBL("GETDATE")
+B('LPRINT "GET DAT"')
+B('LET D$=""')
+B("FOR I=0 TO 9")
+B("LET D$=D$+CHR$ PEEK (16449+I)")
+B("NEXT I")
+B("GOSUB @GETTIME")
+B("RETURN")
+LBL("GETTIME")
+B('LPRINT "GET TIM"')
+B('LET M$=""')
+B("FOR I=0 TO 7")
+B("LET M$=M$+CHR$ PEEK (16449+I)")
+B("NEXT I")
+B("RETURN")
+# --- resolve labels to line numbers (line 1 is the REM) and emit ---
+lineno={}; _pending=[]; _n=2
+for _k,_v in basic:
+    if _k=="@": _pending.append(_v)
+    else:
+        for _p in _pending: lineno[_p]=_n
+        _pending=[]; _n+=1
+assert not _pending,"trailing label(s): %r"%_pending
+def _resolve(t):
+    def _r(m):
+        assert m.group(1) in lineno,"undefined label @"+m.group(1)
+        return str(lineno[m.group(1)])
+    return _re.sub(r"@(\w+)",_r,t)
+L=[]
+L.append("#!basic-start=2")
+L.append("# OPENSPAND OS LAUNCHER - generated by build_menu.py, do not hand-edit.")
+L.append("# MC OPEN=%d GETSLOT=%d DRAWALL=%d sptr=%d T=%d S=%d N=%d slot=%d"%(A,G,DA,SPTR,TC,SC,NC,SLOT))
+L.append("1 REM "+rem)
+_n=2
+for _k,_v in basic:
+    if _k=="@": continue
+    L.append("%d %s"%(_n,_resolve(_v))); _n+=1
 import os,sys
 here=os.path.dirname(os.path.abspath(__file__))
 bas=os.path.join(here,"menu.bas")
 open(bas,"w").write("\n".join(L)+"\n")
-print("Wrote %s (%d lines). OPEN=%d GETSLOT=%d DRAWROW=%d slot=%d code=%d"%(bas,len(L),A,G,DRW,SLOT,codelen))
+print("Wrote %s (%d lines). OPEN=%d GETSLOT=%d DRAWALL=%d slot=%d code=%d"%(bas,len(L),A,G,DA,SLOT,codelen))
 if "--build" in sys.argv:
     import subprocess,tempfile,glob
     mg=sorted(glob.glob(os.path.expanduser("~/.vscode/extensions/maziac.zx81-bastop-*/out/extension.js")))
