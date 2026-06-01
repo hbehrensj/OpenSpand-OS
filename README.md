@@ -4,18 +4,19 @@ An interactive program launcher for the **Sinclair ZX81** fitted with an
 [**OpenSpand**](https://codeberg.org/NollKollTroll/OpenSpand) expansion.
 
 Browse the SD card, walk into subfolders, and launch `.p` programs with a joystick
-**or** the keyboard — with a live date/time from the OpenSpand real‑time clock.
+**or** the keyboard — with a live date/time from the OpenSpand real‑time clock and a
+**per‑game joystick configuration** that's applied automatically when you launch.
 
 ```
 OPENSPAND OS  2026-05-30  14:23:55
 DIR:/GAMES
-------------------------------
- ..
->CIV.P
+--------------------------------
+ ..             CONFIG
+>CIV.P          C=SET KEYS
  CHESS.P
  INVADERS.P
-------------------------------
-7UP 6DN 5,8PG 0RUN QQUIT
+--------------------------------
+7UP 6DN 5,8PG 0RUN C=KEY Q=X
 ```
 
 ## Features
@@ -25,8 +26,10 @@ DIR:/GAMES
 - Subfolder navigation: enter a folder, select the `..` entry to go up.
 - Live date & time from the OpenSpand RTC.
 - Atari‑style joystick (game port) **and** keyboard control, polled together.
-- Catalog reading, list rendering, **and the whole input poll** done in **Z80 machine code**
-  for speed (BASIC alone is far too slow for snappy scrolling / input on a 3.25 MHz ZX81).
+- **Per‑game joystick key mapping**, saved on the SD card and applied (via the OpenSpand
+  `CONFIG` command) right before the game loads.
+- Catalog reading, list rendering, **and the entire navigation loop** run in **Z80 machine
+  code** — browsing is near‑instant despite BASIC being far too slow on a 3.25 MHz ZX81.
 
 ## Controls
 
@@ -36,12 +39,25 @@ DIR:/GAMES
 | Page up / down | `5` / `8` (or stick left / right) |
 | Run program / enter folder | `0` (or fire) |
 | Up one level | select the `..` entry |
+| Configure the selected game's keys | `C` |
 | Quit launcher | `Q` |
 
 Works with an Atari‑compatible joystick on the OpenSpand game port, or with the
-keyboard. (When the joystick is in CONFIG‑J keyboard‑injection mode it can interfere
-with real keyboard reads; the launcher reads the joystick *raw*, so the controller
-works regardless.)
+keyboard. (When the joystick is in `CONFIG‑J` keyboard‑injection mode it can interfere
+with real keyboard reads; the launcher reads the joystick *raw*, so the controller works
+regardless.)
+
+## Per‑game joystick configuration
+
+Different games expect different keys. Highlight a `.p` game and press **`C`** — the right
+panel prompts you to **press a key** for each direction in turn (Up, Down, Left, Right,
+Fire). Whatever key you press is recorded for that direction, and when all five are set the
+mapping is saved as a hidden **`GAME.C`** file next to the game.
+
+When you later launch that game, the launcher issues `CONFIG "J=…"` so the OpenSpand injects
+your chosen keys for the joystick — no need to reconfigure the interface by hand. Games
+without a `.c` file launch with whatever joystick config is already set. The `.c` files are
+hidden from the listing.
 
 ## Install
 
@@ -63,23 +79,32 @@ Or convert `menu.bas` → `menu.p` yourself with the
 [**maziac.zx81-bastop**](https://marketplace.visualstudio.com/items?itemName=maziac.zx81-bastop)
 VSCode extension (right‑click the file, or run the build task in `.vscode/tasks.json`).
 
-Tunables live at the top of `build_menu.py` (`SW` = max name length, `MAXE` = max
-entries per directory, `V` = visible rows).
+The BASIC is written with **labels** rather than hard line numbers — `build_menu.py` runs a
+small two‑pass pass that assigns line numbers and resolves `GOTO`/`GOSUB` targets (the same
+trick the Z80 assembler in the file uses for jumps), so code can be reordered freely.
+
+Tunables live at the top of `build_menu.py`: `SW` (max name length / list width), `MAXE`
+(max entries per directory), `V` (visible rows), `RPTN` (hold‑to‑scroll repeat speed),
+`HKDIV` (idle clock/refresh cadence), `PCOL` (config‑panel column).
 
 ## How it works (notes for the curious)
 
 The interesting parts were all dictated by ZX81/OpenSpand quirks:
 
 - **Catalog read via the low‑level `PRT3` ports.** The high‑level `ZXPAND "OPE CAT"`
-  recurses forever (`directory_stat`) and hard‑resets the machine, so the launcher
-  drives the directory ports directly from a small Z80 routine in line 1's `REM`.
-- **List drawn straight to the display file (DFILE) in machine code.** `PRINT AT`
-  costs ~60 ms per row (≈1 s for a full redraw); writing characters directly to
-  screen memory is near‑instant.
-- **Input poll done in machine code.** A single `WAITKEY` routine reads the raw joystick
-  *and* the keyboard matrix in one non‑blocking poll and returns a single direction code,
-  so the BASIC loop does almost no work per iteration — the ZX81 floating‑point calculator
-  never touches the hot path. Presses register instantly.
+  recurses forever (`directory_stat`) and hard‑resets the machine, so the launcher drives
+  the directory ports directly from a small Z80 routine in line 1's `REM`, one entry at a time.
+- **List drawn straight to the display file (DFILE) in machine code.** `PRINT AT` costs
+  ~60 ms per row (≈1 s for a full redraw); writing characters directly to screen memory is
+  near‑instant.
+- **The navigation loop lives in machine code.** A `NAV` routine polls the raw joystick *and*
+  the keyboard matrix, moves the selection, scrolls, redraws, and handles auto‑repeat — all
+  in Z80. BASIC's loop is a thin shell that only reacts to *actions* (launch / configure /
+  quit), so interpreted‑BASIC overhead is kept off the hot path entirely.
+- **Per‑game config uses plain `SAVE`/`LOAD` + `CONFIG`.** Config files are written/read as raw
+  memory blocks (`SAVE ">NAME.C;addr,len"` / `LOAD "NAME.C;addr"`), and applied with the
+  `CONFIG` command — which on OpenSpand is the **`LLIST` token**, not a `ZXPAND`/`LPRINT`
+  verb. No machine code needed for any of it.
 - Everything — Z80 *and* BASIC — is produced by `build_menu.py`.
 
 ## Vibe‑coded
@@ -87,15 +112,19 @@ The interesting parts were all dictated by ZX81/OpenSpand quirks:
 This project was **vibe‑coded**: built end‑to‑end through an iterative, conversational
 collaboration with an AI assistant (Anthropic's **Claude**), driven by real hardware
 testing and a lot of back‑and‑forth debugging. The OpenSpand command interface and
-directory format were reverse‑engineered from the firmware sources, and the ZX81
-gotchas (the `PRINT AT` row limit, the `directory_stat` crash, Z80 register‑opcode
-traps, the floating‑point cost) were each discovered and worked around along the way.
+directory format were reverse‑engineered from the firmware sources and confirmed with
+on‑hardware probes, and the ZX81 gotchas (the `PRINT AT` row limit, the `directory_stat`
+crash, Z80 register‑opcode traps, single‑letter string‑variable names, the floating‑point
+cost) were each discovered and worked around along the way.
 
 ## Credits & thanks
 
 Huge thanks to **Adam Klotblixt** (*NollKollTroll*), creator of **OpenSpand** — the
 open‑source, all‑in‑one ZX80/ZX81 expansion this launcher is built for and could not
 exist without. Project home: <https://codeberg.org/NollKollTroll/OpenSpand>
+
+The `CONFIG`/`ZXPAND` command conventions follow **ZXpand** (Charlie Robson); the snappy
+machine‑code navigation took inspiration from **zxpand‑commander**.
 
 BASIC tokenizing courtesy of the **ZX81 BASIC to P‑File Converter**
 (`maziac.zx81-bastop`).
