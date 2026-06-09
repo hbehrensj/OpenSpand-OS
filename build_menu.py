@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24
-VER="V1983"
+VER="V1984"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -343,9 +343,33 @@ CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
 PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
-GO=["XXX","X X","X X","X X","XXX"];GS=["XXX","X  ","XXX","  X","XXX"]
-logo=[GO[r]+" "+GS[r]+" "+GO[r]+" "+GS[r] for r in range(5)]
-def blocks(s): return "".join("[128]" if c=="X" else " " for c in s)
+# OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
+# bitmap; every 2x2 px is packed into one ZX81 quadrant-graphic char (codes 0-7 cover
+# the bottom-right-clear combos, 128-135 the bottom-right-set ones via inverse video).
+_OL=["  ########  "," ########## ","###      ###","##        ##","##        ##","##        ##","##        ##","##        ##","##        ##","###      ###"," ########## ","  ########  "]
+_SL=[" ###########","############","###         ","###         ","####        "," ########## ","  ##########","         ###","         ###","        ####","############","########### "]
+def _solid(b):  # fill each row's interior (solid letters)
+    o=[]
+    for r in b:
+        i=r.find('#'); j=r.rfind('#'); o.append(r if i<0 else r[:i]+'#'*(j-i+1)+r[j+1:])
+    return o
+def _zx(tl,tr,bl,br):  # 2x2 pixel mask -> ZX81 char code
+    return (tl+2*tr+4*bl) if not br else 128+((1-tl)+2*(1-tr)+4*(1-bl))
+def _pack(b):  # pixel bitmap -> char-rows of ZX81 codes
+    w=max(len(r) for r in b); b=[r.ljust(w) for r in b]
+    if len(b)%2: b.append(" "*w)
+    rows=[]
+    for y in range(0,len(b),2):
+        rows.append([_zx(int(b[y][x]!=" "),int(x+1<w and b[y][x+1]!=" "),
+                         int(b[y+1][x]!=" "),int(x+1<w and b[y+1][x+1]!=" ")) for x in range(0,w,2)])
+    return rows
+_O=_pack(_solid(_OL)); _S=_pack(_solid(_SL))
+logo=[]
+for r in range(len(_O)):
+    cells=_O[r]+[0]+_S[r]+[0]+_O[r]+[0]+_S[r]
+    logo.append("".join(" " if c==0 else "[%d]"%c for c in cells))
+_lc=(32-(len(_O[0])*4+3))//2     # centered start column
+_tr=3+len(logo)+1                # title row (one blank line under the logo)
 # --- BASIC emitter: statements carry no line numbers; mark a jump target with
 # LBL("NAME") and reference it as @NAME. The two passes at the end assign line
 # numbers (line 1 stays the REM so the MC stays at 16514) and resolve @NAME. ---
@@ -357,9 +381,9 @@ def LBL(n): basic.append(("@",n))
 B("POKE 16,251")
 B("CLS")
 for idx,row in enumerate(logo):
-    B('PRINT AT %d,8;"%s"'%(3+idx,blocks(row)))
-B('PRINT AT 9,3;"OPENSPAND OPERATING SYSTEM"')
-B('PRINT AT 11,%d;"%s"'%((32-len(VER))//2,VER))
+    B('PRINT AT %d,%d;"%s"'%(3+idx,_lc,row))
+B('PRINT AT %d,3;"OPENSPAND OPERATING SYSTEM"'%_tr)
+B('PRINT AT %d,%d;"%s"'%(_tr+2,(32-len(VER))//2,VER))
 for stmt in ['LET V=%d'%V,'LET B$=""','FOR I=1 TO 32','LET B$=B$+" "','NEXT I',
              'LET Y$=""','FOR I=1 TO 30','LET Y$=Y$+"-"','NEXT I',
              'LET Q$="/"','LET P=0','POKE %d,0'%SC,'POKE %d,0'%TC,'LET O=0','LET L=0','LET W=0',
