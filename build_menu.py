@@ -27,6 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24
+VER="V1983"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -285,6 +286,20 @@ lbl("NAVDRAW")
 emit(0xCD); ref("DRAWALL")              # CALL DRAWALL (redraw list with new S/T)
 lbl("NAVR8")
 emit(0x0E,0x08); emit(0x06,0x00); emit(0xC9)   # LD C,8; LD B,0; RET (navigated)
+# BLITDAT/BLITTIM: copy the RTC text from the IO buffer (16449) straight to the screen
+# (row 0 col 13 / col 24) with one LDIR - replaces the BASIC PEEK-loop + string + PRINT.
+lbl("BLITDAT")
+emit(0x2A,0x0C,0x40)                    # LD HL,(16396)
+emit(0x11,14,0); emit(0x19); emit(0xEB)  # LD DE,14; ADD HL,DE; EX DE,HL  (DE=row0 col13)
+emit(0x21,0x41,0x40)                    # LD HL,16449  (IO buffer)
+emit(0x01,10,0)                         # LD BC,10
+emit(0xED,0xB0); emit(0xC9)             # LDIR; RET
+lbl("BLITTIM")
+emit(0x2A,0x0C,0x40)                    # LD HL,(16396)
+emit(0x11,25,0); emit(0x19); emit(0xEB)  # LD DE,25; ADD HL,DE; EX DE,HL  (DE=row0 col24)
+emit(0x21,0x41,0x40)                    # LD HL,16449
+emit(0x01,8,0)                          # LD BC,8
+emit(0xED,0xB0); emit(0xC9)             # LDIR; RET
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -326,6 +341,7 @@ A=addr("OPEN");G=addr("GET");DA=addr("DRAWALL");WK=addr("WAITKEY")
 SPTR=addr("sptr");TC=addr("TCELL");SC=addr("SCELL");NC=addr("NCELL")
 CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
 PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
+BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 GO=["XXX","X X","X X","X X","XXX"];GS=["XXX","X  ","XXX","  X","XXX"]
 logo=[GO[r]+" "+GS[r]+" "+GO[r]+" "+GS[r] for r in range(5)]
@@ -343,6 +359,7 @@ B("CLS")
 for idx,row in enumerate(logo):
     B('PRINT AT %d,8;"%s"'%(3+idx,blocks(row)))
 B('PRINT AT 9,3;"OPENSPAND OPERATING SYSTEM"')
+B('PRINT AT 11,%d;"%s"'%((32-len(VER))//2,VER))
 for stmt in ['LET V=%d'%V,'LET B$=""','FOR I=1 TO 32','LET B$=B$+" "','NEXT I',
              'LET Y$=""','FOR I=1 TO 30','LET Y$=Y$+"-"','NEXT I',
              'LET Q$="/"','LET P=0','POKE %d,0'%SC,'POKE %d,0'%TC,'LET O=0','LET L=0','LET W=0',
@@ -364,18 +381,21 @@ B("POKE %d+I,0"%SLOT)
 B("NEXT I")
 LBL("LISTN")
 B("LET N=P>0")
-LBL("GETLOOP")
 B("LET SA=%d+%d*N"%(SLOT,SW))
 B("POKE %d,SA-256*INT (SA/256)"%SPTR)
 B("POKE %d,INT (SA/256)"%(SPTR+1))
+LBL("GETLOOP")
 B("LET M=USR %d"%G)
 B("IF M=0 THEN GOTO @LISTDONE")
 B("IF M<2 THEN GOTO @KEEP")
 B("IF PEEK (SA+M-2)<>27 THEN GOTO @KEEP")
 B("IF PEEK (SA+M-1)<>40 THEN GOTO @KEEP")
+B("POKE %d,SA-256*INT (SA/256)"%SPTR)
+B("POKE %d,INT (SA/256)"%(SPTR+1))
 B("GOTO @GETLOOP")
 LBL("KEEP")
 B("LET N=N+1")
+B("LET SA=SA+%d"%SW)
 B("IF N>%d THEN GOTO @LISTDONE"%MAXE)
 B("GOTO @GETLOOP")
 LBL("LISTDONE")
@@ -497,7 +517,6 @@ B("IF K=7 THEN GOTO @CFGEDIT")
 B("GOTO @MAINLOOP")
 LBL("HOUSE")
 B("GOSUB @GETTIME")
-B("PRINT AT 0,24;M$")
 B("GOTO @MAINLOOP")
 LBL("FIRE")
 B("GOSUB @ACTIVATE")
@@ -527,8 +546,6 @@ LBL("REDRAW")
 B("CLS")
 B('PRINT AT 0,0;"OPENSPAND OS"')
 B("GOSUB @GETDATE")
-B("PRINT AT 0,13;D$")
-B("PRINT AT 0,24;M$")
 B('PRINT AT 1,0;"DIR:";Q$')
 B("PRINT AT 2,0;Y$")
 B("PRINT AT 20,0;Y$")
@@ -536,11 +553,6 @@ B('PRINT AT 21,0;"7UP 6DN 5,8PG 0RUN C=KEY Q=X";')
 B("GOSUB @DRAW")
 B('PRINT AT 3,%d;"CONFIG"'%PCOL)
 B('PRINT AT 5,%d;"C=SET KEYS"'%PCOL)
-B("RETURN")
-# DELAY: short key-repeat throttle.
-LBL("DELAY")
-B("FOR I=1 TO 3")
-B("NEXT I")
 B("RETURN")
 # ACTIVATE: fire on the selected entry - run file / enter dir / go up.
 LBL("ACTIVATE")
@@ -570,18 +582,12 @@ B("RETURN")
 # GETDATE/GETTIME: read the RTC into D$/M$ from the IO buffer at 16449.
 LBL("GETDATE")
 B('LPRINT "GET DAT"')
-B('LET D$=""')
-B("FOR I=0 TO 9")
-B("LET D$=D$+CHR$ PEEK (16449+I)")
-B("NEXT I")
+B("LET X=USR %d"%BD)
 B("GOSUB @GETTIME")
 B("RETURN")
 LBL("GETTIME")
 B('LPRINT "GET TIM"')
-B('LET M$=""')
-B("FOR I=0 TO 7")
-B("LET M$=M$+CHR$ PEEK (16449+I)")
-B("NEXT I")
+B("LET X=USR %d"%BT)
 B("RETURN")
 # --- resolve labels to line numbers (line 1 is the REM) and emit ---
 lineno={}; _pending=[]; _n=2
