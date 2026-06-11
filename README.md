@@ -13,7 +13,7 @@ DIR:/GAMES
 --------------------------------
  ..             CONFIG
 >CIV.P          C=SET KEYS
- CHESS.P
+ CHESS.P        S=SERIAL IN
  INVADERS.P
 --------------------------------
 7UP 6DN 5,8PG 0RUN C=KEY Q=X
@@ -28,6 +28,8 @@ DIR:/GAMES
 - Atari‑style joystick (game port) **and** keyboard control, polled together.
 - **Per‑game joystick key mapping**, saved on the SD card and applied (via the OpenSpand
   `CONFIG` command) right before the game loads.
+- **Serial program transfer** — send a `.p` straight from a PC over the serial port; it's
+  saved to the SD card as `INBOX.P`, then launched like any other file.
 - Catalog reading, list rendering, **and the entire navigation loop** run in **Z80 machine
   code** — browsing is near‑instant despite BASIC being far too slow on a 3.25 MHz ZX81.
 
@@ -40,6 +42,7 @@ DIR:/GAMES
 | Run program / enter folder | `0` (or fire) |
 | Up one level | select the `..` entry |
 | Configure the selected game's keys | `C` |
+| Receive a `.p` over serial | `S` |
 | Quit launcher | `Q` |
 
 Works with an Atari‑compatible joystick on the OpenSpand game port, or with the
@@ -58,6 +61,30 @@ When you later launch that game, the launcher issues `CONFIG "J=…"` so the Ope
 your chosen keys for the joystick — no need to reconfigure the interface by hand. Games
 without a `.c` file launch with whatever joystick config is already set. The `.c` files are
 hidden from the listing.
+
+## Serial program transfer (dev workflow)
+
+Send a `.p` straight from your PC over the OpenSpand's serial port — handy for testing a
+program you just built without shuffling the SD card.
+
+1. On the ZX81, press **`S`** (the launcher waits for data).
+2. On the PC (macOS/Linux), run the sender:
+   ```sh
+   ./sendp.sh yourprog.p
+   ```
+3. The bytes are received into spare RAM, saved to the SD card as **`INBOX.P`**, and the
+   launcher returns to the browser. Select `INBOX.P` and launch it like any other program.
+
+Edit the serial device path at the top of [`sendp.sh`](sendp.sh) to match yours
+(`ls /dev/cu.*` on macOS). Max program size is ~15 KB (the receive buffer lives in the unused
+RAM above `RAMTOP`).
+
+**Protocol (PC → ZX81, one‑way):** the sender transmits a `0xAA 0x55` sync marker, a 2‑byte
+little‑endian length, then the raw file bytes; the ZX81 syncs past any line glitches and reads
+exactly that many bytes. This is *not* the ZXpand `LOAD "$"` / `zxsvr` protocol — that one is
+ZX81‑initiated and needs the ZX81 to transmit (ACK each block), which isn't possible here
+driving the serial port from the standard ROM. The one‑way push needs no transmit side and
+works reliably at 9600 baud.
 
 ## Install
 
@@ -136,6 +163,7 @@ BASIC tokenizing courtesy of the **ZX81 BASIC to P‑File Converter**
 | `build_menu.py` | Generator — source of truth (Z80 assembler + BASIC emitter) |
 | `menu.bas` | Generated ZX81 BASIC (zxtext2p text format) |
 | `menu.p` | The runnable ZX81 program — copy this to the SD card |
+| `sendp.sh` | PC‑side sender for serial program transfer (`./sendp.sh file.p`) |
 | `.vscode/tasks.json` | VSCode build task (`Build menu.p`) |
 | `LICENSE` | GNU GPL v3.0 |
 

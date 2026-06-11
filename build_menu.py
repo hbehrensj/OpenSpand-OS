@@ -26,8 +26,8 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 
 Usage: python3 build_menu.py [--build]
 """
-SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24
-VER="V1984"
+SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=9600; RXIDL=8192
+VER="V1985"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -154,6 +154,8 @@ emit(0x01,0xFE,0xFB); emit(0xED,0x78)                    # LD BC,0xFBFE; IN A,(C
 emit(0xCB,0x47); jr("Z","WKQT")                          # bit0=keyQ quit
 emit(0x01,0xFE,0xFE); emit(0xED,0x78)                    # LD BC,0xFEFE; IN A,(C)  keys SHIFT,Z,X,C,V
 emit(0xCB,0x5F); jr("Z","WKCFG")                         # bit3=key C -> config edit
+emit(0x01,0xFE,0xFD); emit(0xED,0x78)                    # LD BC,0xFDFE; IN A,(C)  keys A,S,D,F,G
+emit(0xCB,0x4F); jr("Z","WKSER")                         # bit1=key S -> serial load
 emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)             # none
 lbl("WKUP"); emit(0x0E,0x01); emit(0x06,0x00); emit(0xC9)
 lbl("WKDN"); emit(0x0E,0x02); emit(0x06,0x00); emit(0xC9)
@@ -162,6 +164,7 @@ lbl("WKFR"); emit(0x0E,0x04); emit(0x06,0x00); emit(0xC9)
 lbl("WKPD"); emit(0x0E,0x05); emit(0x06,0x00); emit(0xC9)
 lbl("WKQT"); emit(0x0E,0x06); emit(0x06,0x00); emit(0xC9)
 lbl("WKCFG"); emit(0x0E,0x07); emit(0x06,0x00); emit(0xC9)
+lbl("WKSER"); emit(0x0E,10); emit(0x06,0x00); emit(0xC9)
 # PANELMC: blit the PR x PW panel buffer (pbuf) to the DFILE at screen rows 3..,
 # cols PCOL.. (DEST=(16396)+1+3*33+PCOL = +100+PCOL, walks +33 per row). Straight
 # copy (DE=SRC walks pbuf continuously). Replaces ~9 slow PRINT AT per panel update.
@@ -300,6 +303,32 @@ emit(0x11,25,0); emit(0x19); emit(0xEB)  # LD DE,25; ADD HL,DE; EX DE,HL  (DE=ro
 emit(0x21,0x41,0x40)                    # LD HL,16449
 emit(0x01,8,0)                          # LD BC,8
 emit(0xED,0xB0); emit(0xC9)             # LDIR; RET
+# RXSER: drain the serial port (status 0x00EB bit1, data 0x00E3) into the buffer at
+# (RXPTR) until an idle gap (RXIDL empty polls), or until the buffer high-byte reaches
+# RXENDHI. Returns byte count in BC. SPACE (0x7FFE bit0) aborts the initial wait.
+lbl("RXSER")
+emit(0x2A); ref("RXPTR")                # LD HL,(RXPTR)
+lbl("RXSYN")                            # skip everything until the sync byte 0xAA
+emit(0xCD); ref("RXBYTE"); emit(0xFE,0xAA); jr("NZ","RXSYN")
+lbl("RXSYN2")                           # next byte must be 0x55
+emit(0xCD); ref("RXBYTE"); emit(0xFE,0x55); jr("Z","RXLEN")
+emit(0xFE,0xAA); jr("Z","RXSYN2")       # another 0xAA -> still hunting for 0x55
+jr(None,"RXSYN")
+lbl("RXLEN")
+emit(0xCD); ref("RXBYTE"); emit(0x5F)   # length lo -> E
+emit(0xCD); ref("RXBYTE"); emit(0x57)   # length hi -> D ; DE = N
+lbl("RXRL")                             # receive exactly N bytes
+emit(0x7A); emit(0xB3); jr("Z","RXDONE")             # LD A,D; OR E; N==0 -> done
+emit(0xCD); ref("RXBYTE"); emit(0x77); emit(0x23)    # data byte; store; INC HL
+emit(0x3A); ref("RXEHI"); emit(0xBC); jr("Z","RXDONE")   # buffer-full guard
+emit(0x1B); jr(None,"RXRL")             # DEC DE; loop
+lbl("RXDONE")
+emit(0xED,0x5B); ref("RXPTR")           # LD DE,(RXPTR)
+emit(0xB7); emit(0xED,0x52)             # OR A; SBC HL,DE -> count
+emit(0x44); emit(0x4D); emit(0xC9)      # LD B,H; LD C,L; RET
+lbl("RXBYTE")                           # wait for and return one received byte in A
+emit(0x01,0xEB,0x00); emit(0xED,0x78); emit(0xCB,0x4F); jr("Z","RXBYTE")
+emit(0x01,0xE3,0x00); emit(0xED,0x78); emit(0xC9)
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -308,6 +337,8 @@ lbl("NCELL"); emit(0)
 lbl("RPT"); emit(0)
 lbl("ACTDN"); emit(0)
 lbl("IDLECNT"); emit(0)
+lbl("RXPTR"); emit(0,0)
+lbl("RXEHI"); emit(0)
 lbl("cfgbuf")
 for _ in range(16): emit(0)
 # panel render buffer (PR rows x PW cols), pre-filled with the static labels.
@@ -341,6 +372,7 @@ A=addr("OPEN");G=addr("GET");DA=addr("DRAWALL");WK=addr("WAITKEY")
 SPTR=addr("sptr");TC=addr("TCELL");SC=addr("SCELL");NC=addr("NCELL")
 CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
 PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
+RXS=addr("RXSER");RXP=addr("RXPTR");REH=addr("RXEHI")
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 # OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
@@ -538,6 +570,7 @@ B("IF K=9 THEN GOTO @HOUSE")
 B("IF K=4 THEN GOTO @FIRE")
 B("IF K=6 THEN GOTO @QUIT")
 B("IF K=7 THEN GOTO @CFGEDIT")
+B("IF K=10 THEN GOTO @SERLOAD")
 B("GOTO @MAINLOOP")
 LBL("HOUSE")
 B("GOSUB @GETTIME")
@@ -548,6 +581,38 @@ B("GOTO @MAINLOOP")
 LBL("QUIT")
 B("CLS")
 B("STOP")
+# SERLOAD (S key): receive a streamed .p over serial into a high-RAM buffer, save it
+# to SER.P on the SD card, then LOAD it. Buffer sits just below RAMTOP (no .bas bloat).
+LBL("SERLOAD")
+B("CLS")
+B('PRINT AT 4,2;"SERIAL LOAD"')
+B("LET RM=PEEK 16388+256*PEEK 16389")
+B("LET BA=RM+256")
+B("LET EN=RM+15872")
+B("POKE EN,170")
+B("POKE BA,85")
+B("IF PEEK EN<>170 THEN GOTO @SERNOR")
+B("IF PEEK BA<>85 THEN GOTO @SERNOR")
+B("POKE %d,BA-256*INT (BA/256)"%RXP)
+B("POKE %d,INT (BA/256)"%(RXP+1))
+B("POKE %d,INT (EN/256)"%REH)
+B('PRINT AT 6,2;"RUN SENDER ON PC"')
+B('PRINT AT 7,2;"(WAIT FOR IT)"')
+B('LPRINT "OPE SER %d"'%SERBAUD)
+B("LET RL=USR %d"%RXS)
+B('LPRINT "CLO SER"')
+B("IF RL=0 THEN GOTO @SERCAN")
+B('PRINT AT 9,2;"GOT ";RL;" BYTES"')
+B('LET F$=">INBOX.P;"+STR$ BA+","+STR$ RL')
+B("SAVE F$")
+B("GOTO @SERCAN")
+LBL("SERNOR")
+B('PRINT AT 6,2;"NO FREE RAM ABOVE RAMTOP"')
+B("GOSUB @GETKEY")
+LBL("SERCAN")
+B("GOSUB @LISTDIR")
+B("GOSUB @REDRAW")
+B("GOTO @MAINLOOP")
 # GOUP: go up one directory level (chdir '..', pop path).
 LBL("GOUP")
 B("IF P=0 THEN RETURN")
@@ -577,6 +642,7 @@ B('PRINT AT 21,0;"7UP 6DN 5,8PG 0RUN C=KEY Q=X";')
 B("GOSUB @DRAW")
 B('PRINT AT 3,%d;"CONFIG"'%PCOL)
 B('PRINT AT 5,%d;"C=SET KEYS"'%PCOL)
+B('PRINT AT 7,%d;"S=SERIAL IN"'%PCOL)
 B("RETURN")
 # ACTIVATE: fire on the selected entry - run file / enter dir / go up.
 LBL("ACTIVATE")
