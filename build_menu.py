@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1990"
+VER="V1991"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -152,8 +152,8 @@ emit(0x01,0xFE,0xF7); emit(0xED,0x78)                    # LD BC,0xF7FE; IN A,(C
 emit(0xCB,0x67); jr("Z","WKPU")                          # bit4=key5 pageup
 emit(0x01,0xFE,0xFB); emit(0xED,0x78)                    # LD BC,0xFBFE; IN A,(C)  keys Q,W,E,R,T
 emit(0xCB,0x47); jr("Z","WKQT")                          # bit0=keyQ quit
-emit(0x01,0xFE,0xFE); emit(0xED,0x78)                    # LD BC,0xFEFE; IN A,(C)  keys SHIFT,Z,X,C,V
-emit(0xCB,0x5F); jr("Z","WKCFG")                         # bit3=key C -> config edit
+emit(0x01,0xFE,0xBF); emit(0xED,0x78)                    # LD BC,0xBFFE; IN A,(C)  keys ENTER,L,K,J,H
+emit(0xCB,0x5F); jr("Z","WKCFG")                         # bit3=key J -> joystick config (C freed for Claude)
 emit(0x01,0xFE,0xFD); emit(0xED,0x78)                    # LD BC,0xFDFE; IN A,(C)  keys A,S,D,F,G
 emit(0xCB,0x4F); jr("Z","WKSER")                         # bit1=key S -> serial load
 emit(0x01,0xFE,0xDF); emit(0xED,0x78)                    # LD BC,0xDFFE; IN A,(C)  keys P,O,I,U,Y
@@ -410,9 +410,9 @@ def zc(ch):
 pbuf_init=[0]*(PR*PW)
 def pput(pr,col,s):
     for i,ch in enumerate(s): pbuf_init[pr*PW+col+i]=zc(ch)
-pput(0,0,"OS CONFIG")
+pput(0,0,"JOYSTICK")
 pput(2,1,"UP");  pput(3,1,"DOWN"); pput(4,1,"LEFT"); pput(5,1,"RIGHT"); pput(6,1,"FIRE")
-pput(8,1,"CFG"); pput(9,1,"RUN");  pput(11,0,"C=EDIT")
+pput(8,1,"CFG"); pput(9,1,"RUN");  pput(11,0,"J=EDIT")
 lbl("pbuf")
 for b in pbuf_init: emit(b)
 lbl("bufA")
@@ -747,12 +747,11 @@ B("GOSUB @GETDATE")
 B('PRINT AT 1,0;"DIR:";Q$')
 B("PRINT AT 2,0;Y$")
 B("PRINT AT 20,0;Y$")
-B('PRINT AT 21,0;"7UP 6DN 5,8PG 0RUN C=KEY Q=X";')
+B('PRINT AT 21,0;"7UP 6DN 5,8PG 0RUN J=JOY Q=X";')
 B("GOSUB @DRAW")
-B('PRINT AT 3,%d;"CONFIG"'%PCOL)
-B('PRINT AT 5,%d;"C=SET KEYS"'%PCOL)
-B('PRINT AT 7,%d;"S=SERIAL IN"'%PCOL)
-B('PRINT AT 9,%d;"U=UPDATE OS"'%PCOL)
+B('PRINT AT 3,%d;"J=SET JOYSTICK"'%PCOL)
+B('PRINT AT 5,%d;"S=SERIAL IN"'%PCOL)
+B('PRINT AT 7,%d;"U=UPDATE OS"'%PCOL)
 B("RETURN")
 # ACTIVATE: fire on the selected entry - run file / enter dir / go up.
 LBL("ACTIVATE")
