@@ -18,6 +18,13 @@ python3 build_menu.py --build  # also tokenizes menu.bas -> menu.p
 Goal after any change: `warnings: 0`. Copy `menu.p` to the SD card to run (rename `MENU.P`
 to auto-boot). Bump `VER="V…"` (top of build_menu.py) for a user-visible change.
 
+**Releasing (for the ESP auto-update):** commit the rebuilt `menu.p`, then push a matching
+tag — `git tag -a vNNNN && git push origin vNNNN` (e.g. `v1988` for `VER="V1988"`). The
+`.github/workflows/release.yml` job attaches `menu.p` + a generated `version.json` (version
+parsed from `VER`) to the GitHub Release. The [osos-esp32](https://github.com/hbehrensj/osos-esp32)
+bridge mirrors that release; the ZX81 installs it via the **U** key (zxsvr `'U'` verb →
+`@OSUPDATE` → `RXSER` → `SAVE >MENU.P` → `LOAD "MENU.P"`).
+
 ## How it's built
 
 ZX81 BASIC is far too slow, so the hot paths are **Z80 machine code living in line 1's
