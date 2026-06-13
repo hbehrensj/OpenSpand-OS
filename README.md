@@ -7,6 +7,10 @@ Browse the SD card, walk into subfolders, and launch `.p` programs with a joysti
 **or** the keyboard — with a live date/time from the OpenSpand real‑time clock and a
 **per‑game joystick configuration** that's applied automatically when you launch.
 
+A companion **[osos‑esp32](https://github.com/hbehrensj/osos-esp32)** ESP32‑S2 bridge sits
+on the OpenSpand serial header and gives the launcher **WiFi**: upload programs from a
+browser, and **auto‑update OSOS itself** from this repo's GitHub releases (press `U`).
+
 ```
 OPENSPAND OS  2026-05-30  14:23:55
 DIR:/GAMES
@@ -14,7 +18,7 @@ DIR:/GAMES
  ..             CONFIG
 >CIV.P          C=SET KEYS
  CHESS.P        S=SERIAL IN
- INVADERS.P
+ INVADERS.P     U=UPDATE OS
 --------------------------------
 7UP 6DN 5,8PG 0RUN C=KEY Q=X
 ```
@@ -28,8 +32,12 @@ DIR:/GAMES
 - Atari‑style joystick (game port) **and** keyboard control, polled together.
 - **Per‑game joystick key mapping**, saved on the SD card and applied (via the OpenSpand
   `CONFIG` command) right before the game loads.
-- **Serial program transfer** — send a `.p` straight from a PC over the serial port; it's
-  saved to the SD card as `INBOX.P`, then launched like any other file.
+- **Serial program transfer** — send a `.p` straight from a PC (or the
+  [osos‑esp32](https://github.com/hbehrensj/osos-esp32) WiFi bridge) over the serial port;
+  it's saved to the SD card as `INBOX.P`, then launched like any other file.
+- **Auto‑update over WiFi** — with the [osos‑esp32](https://github.com/hbehrensj/osos-esp32)
+  bridge, press `U` to pull the latest `menu.p` from this repo's GitHub releases and reboot
+  into it.
 - Catalog reading, list rendering, **and the entire navigation loop** run in **Z80 machine
   code** — browsing is near‑instant despite BASIC being far too slow on a 3.25 MHz ZX81.
 
@@ -43,6 +51,7 @@ DIR:/GAMES
 | Up one level | select the `..` entry |
 | Configure the selected game's keys | `C` |
 | Receive a `.p` over serial | `S` |
+| Update OSOS over WiFi (osos‑esp32 bridge) | `U` |
 | Quit launcher | `Q` |
 
 Works with an Atari‑compatible joystick on the OpenSpand game port, or with the
@@ -88,6 +97,30 @@ a 2‑byte checksum; finally the ZX81 sends `'X'`. Because the data arrives back
 per‑byte handshake, the receive runs in `FAST` mode so the full‑speed CPU keeps the OpenSpand's
 32‑byte serial FIFO drained. (Transmitting from the ZX81 works by writing the serial data port
 `0x00E3` once status `0x00EB` bit 2 signals the TX buffer has room.)
+
+## WiFi bridge & auto‑update (osos‑esp32)
+
+For day‑to‑day use, the **[osos‑esp32](https://github.com/hbehrensj/osos-esp32)** ESP32‑S2
+bridge stays permanently on the OpenSpand serial header and runs the `zxsvr` server itself,
+so no PC script is needed:
+
+- **Send a program** — upload a `.p` in the bridge's web UI, then press **`S`** on the ZX81;
+  it pulls it as `INBOX.P` over WiFi.
+- **Auto‑update OSOS** — press **`U`**. The ZX81 asks the bridge (zxsvr `'U'` verb, carrying
+  its own version) whether a newer `menu.p` is published here on GitHub; if so it pulls it,
+  saves it as `MENU.P`, and `LOAD`s it — booting the new version. The bridge mirrors the
+  latest release automatically.
+
+The bench `zxserver.sh` / `zxsvr.exe` path above still works for a direct PC‑to‑ZX81 link
+without the bridge. See the [osos‑esp32 repo](https://github.com/hbehrensj/osos-esp32) for
+firmware, wiring, and the full serial‑protocol spec.
+
+### Releasing a new version
+
+Bump `VER="V…"` in `build_menu.py`, rebuild, commit the new `menu.p`, then push a matching
+tag (`git tag -a v1991 && git push origin v1991`). The release workflow attaches `menu.p` +
+a generated `version.json` to the GitHub Release; the bridge mirrors it and the `U` key
+installs it.
 
 ## Install
 
