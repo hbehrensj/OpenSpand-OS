@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1992"
+VER="V1993"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -464,6 +464,49 @@ emit(0x13)                                         # INC DE (terminator)
 djnz("ROW")
 lbl("RDONE")
 emit(0xC9)                                          # RET
+# BKEY: browse-mode input from joystick + keyboard matrix (no INKEY$). Returns in BC:
+#  0 none; 1 page-down (joy down / SPACE); 2 page-up (joy up); 3 ENTER (follow link);
+#  4 back (joy left); 5 quit (Q); 6 clear number (joy fire); 10..19 = digit 0..9.
+lbl("BKEY")
+emit(0x01,0x07,0xE0); emit(0x3E,0xA0); emit(0xED,0x79)   # strobe joystick
+emit(0x01,0x07,0x00); emit(0xED,0x78)                    # IN raw joystick (active low)
+emit(0xCB,0x7F); jr("Z","BK_UP")                         # up
+emit(0xCB,0x77); jr("Z","BK_DN")                         # down
+emit(0xCB,0x6F); jr("Z","BK_BK")                         # left -> back
+emit(0xCB,0x5F); jr("Z","BK_CLR")                        # fire -> clear number
+emit(0x01,0xFE,0xBF); emit(0xED,0x78); emit(0xCB,0x47); jr("Z","BK_ENT")  # ENTER
+emit(0x01,0xFE,0xFB); emit(0xED,0x78); emit(0xCB,0x47); jr("Z","BK_QT")   # Q
+emit(0x01,0xFE,0x7F); emit(0xED,0x78); emit(0xCB,0x47); jr("Z","BK_DN")   # SPACE -> page down
+emit(0x01,0xFE,0xF7); emit(0xED,0x78)                    # keys 1,2,3,4,5
+emit(0xCB,0x47); jr("Z","BK_D1")
+emit(0xCB,0x4F); jr("Z","BK_D2")
+emit(0xCB,0x57); jr("Z","BK_D3")
+emit(0xCB,0x5F); jr("Z","BK_D4")
+emit(0xCB,0x67); jr("Z","BK_D5")
+emit(0x01,0xFE,0xEF); emit(0xED,0x78)                    # keys 0,9,8,7,6
+emit(0xCB,0x47); jr("Z","BK_D0")
+emit(0xCB,0x4F); jr("Z","BK_D9")
+emit(0xCB,0x57); jr("Z","BK_D8")
+emit(0xCB,0x5F); jr("Z","BK_D7")
+emit(0xCB,0x67); jr("Z","BK_D6")
+emit(0x0E,0x00); jr(None,"BKRET")                        # none
+lbl("BK_UP");  emit(0x0E,2);  jr(None,"BKRET")
+lbl("BK_DN");  emit(0x0E,1);  jr(None,"BKRET")
+lbl("BK_BK");  emit(0x0E,4);  jr(None,"BKRET")
+lbl("BK_CLR"); emit(0x0E,6);  jr(None,"BKRET")
+lbl("BK_ENT"); emit(0x0E,3);  jr(None,"BKRET")
+lbl("BK_QT");  emit(0x0E,5);  jr(None,"BKRET")
+lbl("BK_D0");  emit(0x0E,10); jr(None,"BKRET")
+lbl("BK_D1");  emit(0x0E,11); jr(None,"BKRET")
+lbl("BK_D2");  emit(0x0E,12); jr(None,"BKRET")
+lbl("BK_D3");  emit(0x0E,13); jr(None,"BKRET")
+lbl("BK_D4");  emit(0x0E,14); jr(None,"BKRET")
+lbl("BK_D5");  emit(0x0E,15); jr(None,"BKRET")
+lbl("BK_D6");  emit(0x0E,16); jr(None,"BKRET")
+lbl("BK_D7");  emit(0x0E,17); jr(None,"BKRET")
+lbl("BK_D8");  emit(0x0E,18); jr(None,"BKRET")
+lbl("BK_D9");  emit(0x0E,19); jr(None,"BKRET")
+lbl("BKRET"); emit(0x06,0x00); emit(0xC9)                # LD B,0; RET
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -528,7 +571,7 @@ CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
 PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
 RXS=addr("RXSER");RXP=addr("RXPTR");REH=addr("RXEHI")
 UPDQ=addr("UPDQRY");VLO=addr("VLO");VHI=addr("VHI");VERN=int(VER[1:]);WYN=addr("WAITYN")
-BRG=addr("BROWSEGO");BRN=addr("BRENDER");BCMD=addr("BCMD");BLINE=addr("BLINE");BSRC=addr("BSRC");BEND=addr("BEND")
+BRG=addr("BROWSEGO");BRN=addr("BRENDER");BCMD=addr("BCMD");BLINE=addr("BLINE");BSRC=addr("BSRC");BEND=addr("BEND");BK=addr("BKEY")
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 # OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
@@ -826,32 +869,59 @@ B('PRINT AT 11,8;"LOADING..."')
 B("POKE %d,0"%BCMD)                              # cmd 0 = (re)load current page
 B("GOSUB @BRFETCH")
 B("IF A=0 THEN GOTO @BREXIT")
-B("POKE %d,BA-256*INT (BA/256)"%BSRC)
-B("POKE %d,INT (BA/256)"%(BSRC+1))
-B("POKE %d,(BA+RL)-256*INT ((BA+RL)/256)"%BEND)
-B("POKE %d,INT ((BA+RL)/256)"%(BEND+1))
+B("GOSUB @BRSETBUF")
+B("LET L=0")
 B("LET W=0")
 LBL("BRSHOW")
 B("CLS")
 B("POKE %d,W-256*INT (W/256)"%BLINE)
 B("POKE %d,INT (W/256)"%(BLINE+1))
 B("LET X=USR %d"%BRN)
-B('PRINT AT 21,0;"7-6 SCROLL  Q EXIT";')
+LBL("BRSTAT")
+B('PRINT AT 21,0;"LINK ";L;" ENT=GO Q=X    ";')
 LBL("BRKEY")
-B("LET K=USR %d"%WK)
+B("LET K=USR %d"%BK)
 B("IF K=0 THEN GOTO @BRKEY")
-B("IF K=6 THEN GOTO @BREXIT")
-B("IF K=1 THEN LET W=W-19")
-B("IF K=3 THEN LET W=W-19")
-B("IF K=2 THEN LET W=W+19")
-B("IF K=5 THEN LET W=W+19")
-B("IF W<0 THEN LET W=0")
 LBL("BRREL")
-B("IF USR %d<>0 THEN GOTO @BRREL"%WK)
+B("IF USR %d<>0 THEN GOTO @BRREL"%BK)
+B("IF K=5 THEN GOTO @BREXIT")
+B("IF K=6 THEN LET L=0")
+B("IF K=6 THEN GOTO @BRSTAT")
+B("IF K>=10 THEN LET L=L*10+K-10")
+B("IF K>=10 THEN GOTO @BRSTAT")
+B("IF K=3 THEN GOTO @BRGO")
+B("IF K=4 THEN GOTO @BRBACK")
+B("IF K=2 THEN LET W=W-19")
+B("IF K=1 THEN LET W=W+19")
+B("IF W<0 THEN LET W=0")
+B("GOTO @BRSHOW")
+LBL("BRGO")
+B("IF L=0 THEN GOTO @BRSTAT")
+B("IF L>120 THEN GOTO @BRSTAT")
+B("POKE %d,L"%BCMD)
+B("GOSUB @BRFETCH")
+B("LET L=0")
+B("IF A=0 THEN GOTO @BRSHOW")
+B("GOSUB @BRSETBUF")
+B("LET W=0")
+B("GOTO @BRSHOW")
+LBL("BRBACK")
+B("POKE %d,255"%BCMD)
+B("GOSUB @BRFETCH")
+B("LET L=0")
+B("IF A=0 THEN GOTO @BRSHOW")
+B("GOSUB @BRSETBUF")
+B("LET W=0")
 B("GOTO @BRSHOW")
 LBL("BREXIT")
 B("GOSUB @REDRAW")
 B("GOTO @MAINLOOP")
+LBL("BRSETBUF")
+B("POKE %d,BA-256*INT (BA/256)"%BSRC)
+B("POKE %d,INT (BA/256)"%(BSRC+1))
+B("POKE %d,(BA+RL)-256*INT ((BA+RL)/256)"%BEND)
+B("POKE %d,INT ((BA+RL)/256)"%(BEND+1))
+B("RETURN")
 # BRFETCH: OPE SER, send 'B'+BCMD, pull the page via RXSER into the high-RAM buffer,
 # CLO SER. Sets A=status (1=ok), RL=byte count. Buffer sits above RAMTOP.
 LBL("BRFETCH")
