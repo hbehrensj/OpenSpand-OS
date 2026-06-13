@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1986"
+VER="V1987"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -156,6 +156,8 @@ emit(0x01,0xFE,0xFE); emit(0xED,0x78)                    # LD BC,0xFEFE; IN A,(C
 emit(0xCB,0x5F); jr("Z","WKCFG")                         # bit3=key C -> config edit
 emit(0x01,0xFE,0xFD); emit(0xED,0x78)                    # LD BC,0xFDFE; IN A,(C)  keys A,S,D,F,G
 emit(0xCB,0x4F); jr("Z","WKSER")                         # bit1=key S -> serial load
+emit(0x01,0xFE,0xDF); emit(0xED,0x78)                    # LD BC,0xDFFE; IN A,(C)  keys P,O,I,U,Y
+emit(0xCB,0x5F); jr("Z","WKUPD")                         # bit3=key U -> OS update
 emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)             # none
 lbl("WKUP"); emit(0x0E,0x01); emit(0x06,0x00); emit(0xC9)
 lbl("WKDN"); emit(0x0E,0x02); emit(0x06,0x00); emit(0xC9)
@@ -165,6 +167,7 @@ lbl("WKPD"); emit(0x0E,0x05); emit(0x06,0x00); emit(0xC9)
 lbl("WKQT"); emit(0x0E,0x06); emit(0x06,0x00); emit(0xC9)
 lbl("WKCFG"); emit(0x0E,0x07); emit(0x06,0x00); emit(0xC9)
 lbl("WKSER"); emit(0x0E,10); emit(0x06,0x00); emit(0xC9)
+lbl("WKUPD"); emit(0x0E,11); emit(0x06,0x00); emit(0xC9)
 # PANELMC: blit the PR x PW panel buffer (pbuf) to the DFILE at screen rows 3..,
 # cols PCOL.. (DEST=(16396)+1+3*33+PCOL = +100+PCOL, walks +33 per row). Straight
 # copy (DE=SRC walks pbuf continuously). Replaces ~9 slow PRINT AT per panel update.
@@ -357,6 +360,16 @@ lbl("TXAW")
 emit(0x01,0xEB,0x00); emit(0xED,0x78); emit(0xCB,0x57); jr("Z","TXAW")
 emit(0xF1)                              # POP AF
 emit(0x01,0xE3,0x00); emit(0xED,0x79); emit(0xC9)   # LD BC,0x00E3; OUT(C),A; RET
+# UPDQRY: OSOS auto-update query (zxsvr 'U' verb). Send 'U' + this OSOS version (2 bytes
+# from VLO/VHI, which BASIC pokes at runtime so a 0x76 version byte never lands in the
+# stored REM); read 1 status byte (0=up-to-date, 1=newer menu.p available -> the ESP arms
+# its update slot for the next I/T/X pull). Returns the status in BC.
+lbl("UPDQRY")
+emit(0x3E,0x55); emit(0xCD); ref("TXA")         # LD A,'U'(0x55); CALL TXA
+emit(0x3A); ref("VLO"); emit(0xCD); ref("TXA")  # LD A,(VLO); CALL TXA  (version lo)
+emit(0x3A); ref("VHI"); emit(0xCD); ref("TXA")  # LD A,(VHI); CALL TXA  (version hi)
+emit(0xCD); ref("RXBYTE")                       # CALL RXBYTE -> A = status
+emit(0x4F); emit(0x06,0x00); emit(0xC9)         # LD C,A; LD B,0; RET
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -370,6 +383,8 @@ lbl("RXEHI"); emit(0)
 lbl("RXBN"); emit(0)
 lbl("RXBL"); emit(0)
 lbl("RXLEN"); emit(0,0)
+lbl("VLO"); emit(0)
+lbl("VHI"); emit(0)
 lbl("cfgbuf")
 for _ in range(16): emit(0)
 # panel render buffer (PR rows x PW cols), pre-filled with the static labels.
@@ -404,6 +419,7 @@ SPTR=addr("sptr");TC=addr("TCELL");SC=addr("SCELL");NC=addr("NCELL")
 CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
 PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
 RXS=addr("RXSER");RXP=addr("RXPTR");REH=addr("RXEHI")
+UPDQ=addr("UPDQRY");VLO=addr("VLO");VHI=addr("VHI");VERN=int(VER[1:])
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 # OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
@@ -602,6 +618,7 @@ B("IF K=4 THEN GOTO @FIRE")
 B("IF K=6 THEN GOTO @QUIT")
 B("IF K=7 THEN GOTO @CFGEDIT")
 B("IF K=10 THEN GOTO @SERLOAD")
+B("IF K=11 THEN GOTO @OSUPDATE")
 B("GOTO @MAINLOOP")
 LBL("HOUSE")
 B("GOSUB @GETTIME")
@@ -646,6 +663,51 @@ LBL("SERCAN")
 B("GOSUB @LISTDIR")
 B("GOSUB @REDRAW")
 B("GOTO @MAINLOOP")
+# OSUPDATE (U key): ask the ESP (zxsvr 'U' verb) whether a newer menu.p is published; if
+# so, pull it (RXSER - the ESP has armed its update slot), SAVE it as >MENU.P, and
+# LOAD "MENU.P" to boot the new OSOS (bare LOAD of an auto-run .p = soft reset).
+LBL("OSUPDATE")
+B("CLS")
+B('PRINT AT 4,2;"OS UPDATE"')
+B('LPRINT "OPE SER %d"'%SERBAUD)
+B("POKE %d,%d"%(VLO, VERN & 255))
+B("POKE %d,%d"%(VHI, (VERN>>8) & 255))
+B("LET A=USR %d"%UPDQ)
+B("IF A=0 THEN GOTO @OSUPNONE")
+B('PRINT AT 6,2;"NEW VERSION READY"')
+B('PRINT AT 7,2;"PRESS Y TO INSTALL"')
+B("GOSUB @GETKEY")
+B('IF G$<>"Y" THEN GOTO @OSUPCAN')
+B("LET RM=PEEK 16388+256*PEEK 16389")
+B("LET BA=RM+256")
+B("LET EN=RM+15872")
+B("POKE EN,170")
+B("POKE BA,85")
+B("IF PEEK EN<>170 THEN GOTO @OSUPCAN")
+B("IF PEEK BA<>85 THEN GOTO @OSUPCAN")
+B("POKE %d,BA-256*INT (BA/256)"%RXP)
+B("POKE %d,INT (BA/256)"%(RXP+1))
+B("POKE %d,INT (EN/256)"%REH)
+B('PRINT AT 9,2;"INSTALLING..."')
+B("FAST")
+B("LET RL=USR %d"%RXS)
+B("SLOW")
+B("IF RL=0 THEN GOTO @OSUPCAN")
+B('LPRINT "CLO SER"')
+B('LET F$=">MENU.P;"+STR$ BA+","+STR$ RL')
+B("SAVE F$")
+B('LOAD "MENU.P"')
+LBL("OSUPNONE")
+B('PRINT AT 6,2;"OS IS UP TO DATE"')
+B('LPRINT "CLO SER"')
+B("GOSUB @GETKEY")
+B("GOTO @OSUPDONE")
+LBL("OSUPCAN")
+B('LPRINT "CLO SER"')
+LBL("OSUPDONE")
+B("GOSUB @LISTDIR")
+B("GOSUB @REDRAW")
+B("GOTO @MAINLOOP")
 # GOUP: go up one directory level (chdir '..', pop path).
 LBL("GOUP")
 B("IF P=0 THEN RETURN")
@@ -676,6 +738,7 @@ B("GOSUB @DRAW")
 B('PRINT AT 3,%d;"CONFIG"'%PCOL)
 B('PRINT AT 5,%d;"C=SET KEYS"'%PCOL)
 B('PRINT AT 7,%d;"S=SERIAL IN"'%PCOL)
+B('PRINT AT 9,%d;"U=UPDATE OS"'%PCOL)
 B("RETURN")
 # ACTIVATE: fire on the selected entry - run file / enter dir / go up.
 LBL("ACTIVATE")
