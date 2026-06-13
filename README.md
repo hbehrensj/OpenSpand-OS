@@ -64,27 +64,30 @@ hidden from the listing.
 
 ## Serial program transfer (dev workflow)
 
-Send a `.p` straight from your PC over the OpenSpand's serial port — handy for testing a
-program you just built without shuffling the SD card.
+Pull a `.p` straight from your PC over the OpenSpand's serial port — handy for testing a
+program you just built without shuffling the SD card. OSOS is a **`zxsvr` client**
+([ZXpand‑Vitamins/serial‑server](https://github.com/charlierobson/ZXpand-Vitamins/tree/master/serial-server)),
+so the PC server just waits and the ZX81 starts the transfer.
 
-1. On the ZX81, press **`S`** (the launcher waits for data).
-2. On the PC (macOS/Linux), run the sender:
-   ```sh
-   ./sendp.sh yourprog.p
-   ```
-3. The bytes are received into spare RAM, saved to the SD card as **`INBOX.P`**, and the
-   launcher returns to the browser. Select `INBOX.P` and launch it like any other program.
+1. On the PC, start the server pointed at your file (leave it running):
+   - Windows: `zxsvr.exe yourprog.p COM3`
+   - macOS/Linux: `./zxserver.sh yourprog.p` (a tiny Python re‑implementation of the same
+     protocol; edit the device path at the top — `ls /dev/cu.*` on macOS)
+2. On the ZX81, press **`S`**. The screen blanks for ~2 s while it pulls the file in `FAST`
+   mode.
+3. The bytes land in spare RAM, are saved to the SD card as **`INBOX.P`**, and the launcher
+   returns to the browser. Select `INBOX.P` and launch it like any other program. Press `S`
+   again any time — the server keeps running for the next transfer.
 
-Edit the serial device path at the top of [`sendp.sh`](sendp.sh) to match yours
-(`ls /dev/cu.*` on macOS). Max program size is ~15 KB (the receive buffer lives in the unused
-RAM above `RAMTOP`).
+Max program size is ~15 KB (the receive buffer lives in the unused RAM above `RAMTOP`).
 
-**Protocol (PC → ZX81, one‑way):** the sender transmits a `0xAA 0x55` sync marker, a 2‑byte
-little‑endian length, then the raw file bytes; the ZX81 syncs past any line glitches and reads
-exactly that many bytes. This is *not* the ZXpand `LOAD "$"` / `zxsvr` protocol — that one is
-ZX81‑initiated and needs the ZX81 to transmit (ACK each block), which isn't possible here
-driving the serial port from the standard ROM. The one‑way push needs no transmit side and
-works reliably at 9600 baud.
+**Protocol (`zxsvr`, ZX81‑initiated pull, 38400 8N1):** the ZX81 sends `'I'` and the server
+replies with the 2‑byte little‑endian file length; then for each 256‑byte block the ZX81 sends
+`'T', blockNum, blockLen` (`blockLen` 0 = 256) and the server returns that many data bytes plus
+a 2‑byte checksum; finally the ZX81 sends `'X'`. Because the data arrives back‑to‑back with no
+per‑byte handshake, the receive runs in `FAST` mode so the full‑speed CPU keeps the OpenSpand's
+32‑byte serial FIFO drained. (Transmitting from the ZX81 works by writing the serial data port
+`0x00E3` once status `0x00EB` bit 2 signals the TX buffer has room.)
 
 ## Install
 
@@ -163,7 +166,7 @@ BASIC tokenizing courtesy of the **ZX81 BASIC to P‑File Converter**
 | `build_menu.py` | Generator — source of truth (Z80 assembler + BASIC emitter) |
 | `menu.bas` | Generated ZX81 BASIC (zxtext2p text format) |
 | `menu.p` | The runnable ZX81 program — copy this to the SD card |
-| `sendp.sh` | PC‑side sender for serial program transfer (`./sendp.sh file.p`) |
+| `zxserver.sh` | macOS/Linux `zxsvr`‑protocol server for serial transfer (`./zxserver.sh file.p`) |
 | `.vscode/tasks.json` | VSCode build task (`Build menu.p`) |
 | `LICENSE` | GNU GPL v3.0 |
 

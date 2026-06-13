@@ -26,8 +26,8 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 
 Usage: python3 build_menu.py [--build]
 """
-SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=9600; RXIDL=8192
-VER="V1985"
+SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
+VER="V1986"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -303,32 +303,60 @@ emit(0x11,25,0); emit(0x19); emit(0xEB)  # LD DE,25; ADD HL,DE; EX DE,HL  (DE=ro
 emit(0x21,0x41,0x40)                    # LD HL,16449
 emit(0x01,8,0)                          # LD BC,8
 emit(0xED,0xB0); emit(0xC9)             # LDIR; RET
-# RXSER: drain the serial port (status 0x00EB bit1, data 0x00E3) into the buffer at
-# (RXPTR) until an idle gap (RXIDL empty polls), or until the buffer high-byte reaches
-# RXENDHI. Returns byte count in BC. SPACE (0x7FFE bit0) aborts the initial wait.
+# RXSER: zxsvr (charlierobson) serial-server CLIENT, ZX81-initiated pull.
+#   send 'I'            -> server returns the file length as 2 bytes (lo,hi)
+#   per 256-byte block: send 'T', blockNum, blockLenByte (0=256)
+#                       -> server returns blockLen data bytes + a 2-byte checksum
+#   send 'X'            -> server done.
+# Data bytes arrive back-to-back at 38400 with no per-byte handshake, so the caller runs
+# this in FAST mode (full CPU keeps the 32-byte FIFO drained). Returns the length in BC.
 lbl("RXSER")
-emit(0x2A); ref("RXPTR")                # LD HL,(RXPTR)
-lbl("RXSYN")                            # skip everything until the sync byte 0xAA
-emit(0xCD); ref("RXBYTE"); emit(0xFE,0xAA); jr("NZ","RXSYN")
-lbl("RXSYN2")                           # next byte must be 0x55
-emit(0xCD); ref("RXBYTE"); emit(0xFE,0x55); jr("Z","RXLEN")
-emit(0xFE,0xAA); jr("Z","RXSYN2")       # another 0xAA -> still hunting for 0x55
-jr(None,"RXSYN")
-lbl("RXLEN")
-emit(0xCD); ref("RXBYTE"); emit(0x5F)   # length lo -> E
-emit(0xCD); ref("RXBYTE"); emit(0x57)   # length hi -> D ; DE = N
-lbl("RXRL")                             # receive exactly N bytes
-emit(0x7A); emit(0xB3); jr("Z","RXDONE")             # LD A,D; OR E; N==0 -> done
-emit(0xCD); ref("RXBYTE"); emit(0x77); emit(0x23)    # data byte; store; INC HL
-emit(0x3A); ref("RXEHI"); emit(0xBC); jr("Z","RXDONE")   # buffer-full guard
-emit(0x1B); jr(None,"RXRL")             # DEC DE; loop
+emit(0x3E,0x49); emit(0xCD); ref("TXA")       # LD A,'I'; CALL TXA   (request info)
+emit(0xCD); ref("RXBYTE"); emit(0x5F)         # CALL RXBYTE; LD E,A  (len lo)
+emit(0xCD); ref("RXBYTE"); emit(0x57)         # CALL RXBYTE; LD D,A  (len hi) -> DE=length
+emit(0xED,0x53); ref("RXLEN")                 # LD (RXLEN),DE
+emit(0x2A); ref("RXPTR")                       # LD HL,(RXPTR)  (write ptr)
+emit(0xAF); emit(0x32); ref("RXBN")           # XOR A; LD (RXBN),A  (blockNum=0)
+lbl("BLKLOOP")
+emit(0x7A); emit(0xB3); jr("Z","RXDONE")      # LD A,D; OR E -> remaining==0 -> done
+emit(0x7A); emit(0xA7); jr("Z","PARTBL")      # LD A,D; AND A -> D==0 -> partial block
+emit(0xAF); jr(None,"STBL")                   # full block: blockLenByte = 0 (=256)
+lbl("PARTBL")
+emit(0x7B)                                     # LD A,E  (partial len = low byte)
+lbl("STBL")
+emit(0x32); ref("RXBL")                        # LD (RXBL),A  (blockLenByte)
+emit(0x3E,0x54); emit(0xCD); ref("TXA")       # LD A,'T'; CALL TXA
+emit(0x3A); ref("RXBN"); emit(0xCD); ref("TXA")  # LD A,(RXBN); CALL TXA  (blockNum)
+emit(0x3A); ref("RXBL"); emit(0xCD); ref("TXA")  # LD A,(RXBL); CALL TXA  (blockLenByte)
+emit(0x3A); ref("RXBL"); emit(0x47)           # LD A,(RXBL); LD B,A  (B=count; 0 -> 256 via DJNZ)
+lbl("RXIN")
+emit(0xC5); emit(0xCD); ref("RXBYTE"); emit(0xC1)  # PUSH BC; CALL RXBYTE; POP BC
+emit(0x77); emit(0x23)                         # LD (HL),A; INC HL
+djnz("RXIN")
+emit(0xCD); ref("RXBYTE"); emit(0xCD); ref("RXBYTE")   # consume 2-byte checksum
+emit(0x3A); ref("RXBL"); emit(0xA7); jr("Z","SUB256")  # LD A,(RXBL); AND A -> 0 means 256
+emit(0x4F)                                     # LD C,A
+emit(0x7B); emit(0x91); emit(0x5F)            # LD A,E; SUB C; LD E,A  (remaining -= len)
+jr("NC","NEXTBN"); emit(0x15)                  # JR NC; DEC D (borrow)
+jr(None,"NEXTBN")
+lbl("SUB256")
+emit(0x15)                                     # DEC D  (remaining -= 256)
+lbl("NEXTBN")
+emit(0x3A); ref("RXBN"); emit(0x3C); emit(0x32); ref("RXBN")  # blockNum++
+jr(None,"BLKLOOP")
 lbl("RXDONE")
-emit(0xED,0x5B); ref("RXPTR")           # LD DE,(RXPTR)
-emit(0xB7); emit(0xED,0x52)             # OR A; SBC HL,DE -> count
-emit(0x44); emit(0x4D); emit(0xC9)      # LD B,H; LD C,L; RET
+emit(0x3E,0x58); emit(0xCD); ref("TXA")       # LD A,'X'; CALL TXA  (terminate)
+emit(0xED,0x4B); ref("RXLEN")                  # LD BC,(RXLEN)  (return length)
+emit(0xC9)
 lbl("RXBYTE")                           # wait for and return one received byte in A
 emit(0x01,0xEB,0x00); emit(0xED,0x78); emit(0xCB,0x4F); jr("Z","RXBYTE")
 emit(0x01,0xE3,0x00); emit(0xED,0x78); emit(0xC9)
+lbl("TXA")                              # transmit the byte in A once TX is ready (status bit2)
+emit(0xF5)                              # PUSH AF
+lbl("TXAW")
+emit(0x01,0xEB,0x00); emit(0xED,0x78); emit(0xCB,0x57); jr("Z","TXAW")
+emit(0xF1)                              # POP AF
+emit(0x01,0xE3,0x00); emit(0xED,0x79); emit(0xC9)   # LD BC,0x00E3; OUT(C),A; RET
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -339,6 +367,9 @@ lbl("ACTDN"); emit(0)
 lbl("IDLECNT"); emit(0)
 lbl("RXPTR"); emit(0,0)
 lbl("RXEHI"); emit(0)
+lbl("RXBN"); emit(0)
+lbl("RXBL"); emit(0)
+lbl("RXLEN"); emit(0,0)
 lbl("cfgbuf")
 for _ in range(16): emit(0)
 # panel render buffer (PR rows x PW cols), pre-filled with the static labels.
@@ -596,10 +627,12 @@ B("IF PEEK BA<>85 THEN GOTO @SERNOR")
 B("POKE %d,BA-256*INT (BA/256)"%RXP)
 B("POKE %d,INT (BA/256)"%(RXP+1))
 B("POKE %d,INT (EN/256)"%REH)
-B('PRINT AT 6,2;"RUN SENDER ON PC"')
-B('PRINT AT 7,2;"(WAIT FOR IT)"')
+B('PRINT AT 6,2;"START ZXSVR ON PC"')
+B('PRINT AT 7,2;"(SCREEN BLANKS)"')
 B('LPRINT "OPE SER %d"'%SERBAUD)
+B("FAST")
 B("LET RL=USR %d"%RXS)
+B("SLOW")
 B('LPRINT "CLO SER"')
 B("IF RL=0 THEN GOTO @SERCAN")
 B('PRINT AT 9,2;"GOT ";RL;" BYTES"')
