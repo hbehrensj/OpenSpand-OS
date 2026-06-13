@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1988"
+VER="V1989"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -370,6 +370,20 @@ emit(0x3A); ref("VLO"); emit(0xCD); ref("TXA")  # LD A,(VLO); CALL TXA  (version
 emit(0x3A); ref("VHI"); emit(0xCD); ref("TXA")  # LD A,(VHI); CALL TXA  (version hi)
 emit(0xCD); ref("RXBYTE")                       # CALL RXBYTE -> A = status
 emit(0x4F); emit(0x06,0x00); emit(0xC9)         # LD C,A; LD B,0; RET
+# WAITYN: blocking Y/N confirm read straight from the keyboard MATRIX (not INKEY$,
+# which OpenSpand CONFIG-J joystick injection blocks). Returns 1 (Y) or 0 (N) in BC.
+# Y = row 0xDFFE bit4 (P,O,I,U,Y); N = row 0x7FFE bit3 (SPACE,.,M,N,B).
+lbl("WAITYN")
+lbl("WYLOOP")
+emit(0x01,0xFE,0xDF); emit(0xED,0x78)           # LD BC,0xDFFE; IN A,(C)
+emit(0xCB,0x67); jr("Z","WYY")                  # BIT 4,A -> Y pressed
+emit(0x01,0xFE,0x7F); emit(0xED,0x78)           # LD BC,0x7FFE; IN A,(C)
+emit(0xCB,0x5F); jr("Z","WYN")                  # BIT 3,A -> N pressed
+jr(None,"WYLOOP")
+lbl("WYY")
+emit(0x0E,0x01); emit(0x06,0x00); emit(0xC9)    # LD C,1; LD B,0; RET (install)
+lbl("WYN")
+emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)    # LD C,0; LD B,0; RET (cancel)
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -419,7 +433,7 @@ SPTR=addr("sptr");TC=addr("TCELL");SC=addr("SCELL");NC=addr("NCELL")
 CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
 PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
 RXS=addr("RXSER");RXP=addr("RXPTR");REH=addr("RXEHI")
-UPDQ=addr("UPDQRY");VLO=addr("VLO");VHI=addr("VHI");VERN=int(VER[1:])
+UPDQ=addr("UPDQRY");VLO=addr("VLO");VHI=addr("VHI");VERN=int(VER[1:]);WYN=addr("WAITYN")
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 # OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
@@ -675,9 +689,9 @@ B("POKE %d,%d"%(VHI, (VERN>>8) & 255))
 B("LET A=USR %d"%UPDQ)
 B("IF A=0 THEN GOTO @OSUPNONE")
 B('PRINT AT 6,2;"NEW VERSION READY"')
-B('PRINT AT 7,2;"PRESS Y TO INSTALL"')
-B("GOSUB @GETKEY")
-B('IF G$<>"Y" THEN GOTO @OSUPCAN')
+B('PRINT AT 7,2;"Y=INSTALL  N=CANCEL"')
+B("LET A=USR %d"%WYN)
+B("IF A=0 THEN GOTO @OSUPCAN")
 B("LET RM=PEEK 16388+256*PEEK 16389")
 B("LET BA=RM+256")
 B("LET EN=RM+15872")
