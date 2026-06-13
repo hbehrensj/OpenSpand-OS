@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1991"
+VER="V1992"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -158,6 +158,8 @@ emit(0x01,0xFE,0xFD); emit(0xED,0x78)                    # LD BC,0xFDFE; IN A,(C
 emit(0xCB,0x4F); jr("Z","WKSER")                         # bit1=key S -> serial load
 emit(0x01,0xFE,0xDF); emit(0xED,0x78)                    # LD BC,0xDFFE; IN A,(C)  keys P,O,I,U,Y
 emit(0xCB,0x5F); jr("Z","WKUPD")                         # bit3=key U -> OS update
+emit(0x01,0xFE,0x7F); emit(0xED,0x78)                    # LD BC,0x7FFE; IN A,(C)  keys SPACE,.,M,N,B
+emit(0xCB,0x67); jr("Z","WKBRW")                         # bit4=key B -> browse
 emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)             # none
 lbl("WKUP"); emit(0x0E,0x01); emit(0x06,0x00); emit(0xC9)
 lbl("WKDN"); emit(0x0E,0x02); emit(0x06,0x00); emit(0xC9)
@@ -168,6 +170,7 @@ lbl("WKQT"); emit(0x0E,0x06); emit(0x06,0x00); emit(0xC9)
 lbl("WKCFG"); emit(0x0E,0x07); emit(0x06,0x00); emit(0xC9)
 lbl("WKSER"); emit(0x0E,10); emit(0x06,0x00); emit(0xC9)
 lbl("WKUPD"); emit(0x0E,11); emit(0x06,0x00); emit(0xC9)
+lbl("WKBRW"); emit(0x0E,12); emit(0x06,0x00); emit(0xC9)
 # PANELMC: blit the PR x PW panel buffer (pbuf) to the DFILE at screen rows 3..,
 # cols PCOL.. (DEST=(16396)+1+3*33+PCOL = +100+PCOL, walks +33 per row). Straight
 # copy (DE=SRC walks pbuf continuously). Replaces ~9 slow PRINT AT per panel update.
@@ -384,6 +387,83 @@ lbl("WYY")
 emit(0x0E,0x01); emit(0x06,0x00); emit(0xC9)    # LD C,1; LD B,0; RET (install)
 lbl("WYN")
 emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)    # LD C,0; LD B,0; RET (cancel)
+# --- Web browser (Phase 3) ---
+# BROWSEGO: send 'B' + the BCMD byte, read 1 status byte (1=ok). Returns it in BC.
+lbl("BROWSEGO")
+emit(0x3E,0x42); emit(0xCD); ref("TXA")           # LD A,'B'; CALL TXA
+emit(0x3A); ref("BCMD"); emit(0xCD); ref("TXA")   # LD A,(BCMD); CALL TXA
+emit(0xCD); ref("RXBYTE")                          # CALL RXBYTE -> A
+emit(0x4F); emit(0x06,0x00); emit(0xC9)            # LD C,A; LD B,0; RET
+# ATEND: carry set if HL >= (BEND). Preserves HL/DE/BC; clobbers A + flags.
+lbl("ATEND")
+emit(0xD5)                                         # PUSH DE
+emit(0xED,0x5B); ref("BEND")                       # LD DE,(BEND)
+emit(0x7D); emit(0x93)                             # LD A,L; SUB E
+emit(0x7C); emit(0x9A)                             # LD A,H; SBC A,D  (carry = HL<BEND)
+emit(0xD1); emit(0x3F); emit(0xC9)                 # POP DE; CCF; RET  (carry = HL>=BEND)
+# CONV: A=ASCII -> A=ZX81 code (newline handled by caller). Preserves HL/DE/BC.
+lbl("CONV")
+emit(0xFE,0x41); jr("C","CONV_D")                  # CP 'A'
+emit(0xFE,0x5B); jr("NC","CONV_P")                 # CP 'Z'+1
+emit(0xD6,27); emit(0xC9)                          # SUB 27 -> 38..63; RET
+lbl("CONV_D")
+emit(0xFE,0x30); jr("C","CONV_P")                  # CP '0'
+emit(0xFE,0x3A); jr("NC","CONV_P")                 # CP '9'+1
+emit(0xD6,20); emit(0xC9)                          # SUB 20 -> 28..37; RET
+lbl("CONV_P")
+emit(0xFE,0x20); jr("C","CONV_SP")                 # <32 -> space
+emit(0xFE,0x60); jr("NC","CONV_SP")                # >=96 -> space
+emit(0xE5)                                         # PUSH HL
+emit(0x21); ref("CONVTAB")                         # LD HL,CONVTAB
+emit(0xD6,0x20)                                    # SUB 32 (index)
+emit(0x85); emit(0x6F)                             # ADD A,L; LD L,A
+jr("NC","CONVP1"); emit(0x24)                      # JR NC; INC H
+lbl("CONVP1")
+emit(0x7E); emit(0xE1); emit(0xC9)                 # LD A,(HL); POP HL; RET
+lbl("CONV_SP")
+emit(0xAF); emit(0xC9)                             # XOR A; RET
+# BRENDER: render text (BSRC..BEND) to DFILE rows 0..20, ASCII->ZX81, from line
+# offset BLINE. Caller CLSes first so untouched cells stay spaces. 33 bytes/DFILE row.
+lbl("BRENDER")
+emit(0x2A); ref("BSRC")                            # LD HL,(BSRC)
+emit(0xED,0x4B); ref("BLINE")                      # LD BC,(BLINE)  lines to skip
+lbl("SKIPO")
+emit(0x78); emit(0xB1); jr("Z","SKIPD")            # LD A,B; OR C; JR Z
+lbl("SKIPI")
+emit(0xCD); ref("ATEND"); jr("C","SKIPD")          # at end -> stop skipping
+emit(0x7E); emit(0x23)                             # LD A,(HL); INC HL
+emit(0xFE,0x0A); jr("NZ","SKIPI")                  # CP 10 (newline?)
+emit(0x0B); jr(None,"SKIPO")                       # DEC BC; loop
+lbl("SKIPD")
+emit(0xE5)                                         # PUSH HL (source)
+emit(0x2A,0x0C,0x40); emit(0x23)                   # LD HL,(16396); INC HL
+emit(0xEB); emit(0xE1)                             # EX DE,HL (DE=dest); POP HL (source)
+emit(0x06,21)                                      # LD B,21 (rows 0..20)
+lbl("ROW")
+emit(0x0E,32)                                      # LD C,32
+lbl("COL")
+emit(0xCD); ref("ATEND"); jr("C","RDONE")          # end of text -> done
+emit(0x7E)                                         # LD A,(HL)
+emit(0xFE,0x0A); jr("Z","EOL")                     # newline -> end of line
+emit(0x23)                                         # INC HL
+emit(0xCD); ref("CONV")                            # A = zx code
+emit(0x12); emit(0x13)                             # LD (DE),A; INC DE
+emit(0x0D); jr("NZ","COL")                         # DEC C; more cols
+emit(0xCD); ref("ATEND"); jr("C","ROWF2")          # row full: consume trailing '\n'
+emit(0x7E); emit(0xFE,0x0A); jr("NZ","ROWF2")
+emit(0x23)                                         # INC HL
+lbl("ROWF2")
+emit(0x13)                                         # INC DE (skip terminator -> next row)
+djnz("ROW"); jr(None,"RDONE")
+lbl("EOL")
+emit(0x23)                                         # INC HL (consume '\n')
+emit(0x7B); emit(0x81); emit(0x5F)                 # LD A,E; ADD A,C; LD E,A (DE += remaining cols)
+jr("NC","EOL1"); emit(0x14)                        # JR NC; INC D
+lbl("EOL1")
+emit(0x13)                                         # INC DE (terminator)
+djnz("ROW")
+lbl("RDONE")
+emit(0xC9)                                          # RET
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -399,6 +479,20 @@ lbl("RXBL"); emit(0)
 lbl("RXLEN"); emit(0,0)
 lbl("VLO"); emit(0)
 lbl("VHI"); emit(0)
+lbl("BCMD"); emit(0)            # browser command byte (0=reload, 1..N=link, 255=back)
+lbl("BLINE"); emit(0,0)        # render line-scroll offset
+lbl("BSRC"); emit(0,0)         # text buffer start (=BA)
+lbl("BEND"); emit(0,0)         # text buffer end (=BA+RL)
+# CONVTAB: ASCII 32..95 -> ZX81 char code (CONV handles A-Z/0-9 by range; this covers
+# space + punctuation; unmappable -> 0/space; '['/']' -> '('/')' since ZX81 has no brackets).
+def _a2z(c):
+    ch=chr(c)
+    if "A"<=ch<="Z": return 38+(c-65)
+    if "0"<=ch<="9": return 28+(c-48)
+    return {" ":0,'"':11,":":14,"?":15,"(":16,")":17,">":18,"<":19,"=":20,"+":21,
+            "-":22,"*":23,"/":24,";":25,",":26,".":27,"$":13,"[":16,"]":17}.get(ch,0)
+lbl("CONVTAB")
+for c in range(32,96): emit(_a2z(c))
 lbl("cfgbuf")
 for _ in range(16): emit(0)
 # panel render buffer (PR rows x PW cols), pre-filled with the static labels.
@@ -434,6 +528,7 @@ CFGB=addr("cfgbuf");BA=addr("bufA");SLOT=addr("slot")
 PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
 RXS=addr("RXSER");RXP=addr("RXPTR");REH=addr("RXEHI")
 UPDQ=addr("UPDQRY");VLO=addr("VLO");VHI=addr("VHI");VERN=int(VER[1:]);WYN=addr("WAITYN")
+BRG=addr("BROWSEGO");BRN=addr("BRENDER");BCMD=addr("BCMD");BLINE=addr("BLINE");BSRC=addr("BSRC");BEND=addr("BEND")
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 # OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
@@ -633,6 +728,7 @@ B("IF K=6 THEN GOTO @QUIT")
 B("IF K=7 THEN GOTO @CFGEDIT")
 B("IF K=10 THEN GOTO @SERLOAD")
 B("IF K=11 THEN GOTO @OSUPDATE")
+B("IF K=12 THEN GOTO @BROWSE")
 B("GOTO @MAINLOOP")
 LBL("HOUSE")
 B("GOSUB @GETTIME")
@@ -722,6 +818,62 @@ LBL("OSUPDONE")
 B("GOSUB @LISTDIR")
 B("GOSUB @REDRAW")
 B("GOTO @MAINLOOP")
+# BROWSE (B key): pull the current web page from the ESP bridge and show it. Stage 1 =
+# render + scroll (up/down/page) + Q to exit. Link-follow and URL entry come next.
+LBL("BROWSE")
+B("CLS")
+B('PRINT AT 11,8;"LOADING..."')
+B("POKE %d,0"%BCMD)                              # cmd 0 = (re)load current page
+B("GOSUB @BRFETCH")
+B("IF A=0 THEN GOTO @BREXIT")
+B("POKE %d,BA-256*INT (BA/256)"%BSRC)
+B("POKE %d,INT (BA/256)"%(BSRC+1))
+B("POKE %d,(BA+RL)-256*INT ((BA+RL)/256)"%BEND)
+B("POKE %d,INT ((BA+RL)/256)"%(BEND+1))
+B("LET W=0")
+LBL("BRSHOW")
+B("CLS")
+B("POKE %d,W-256*INT (W/256)"%BLINE)
+B("POKE %d,INT (W/256)"%(BLINE+1))
+B("LET X=USR %d"%BRN)
+B('PRINT AT 21,0;"7-6 SCROLL  Q EXIT";')
+LBL("BRKEY")
+B("LET K=USR %d"%WK)
+B("IF K=0 THEN GOTO @BRKEY")
+B("IF K=6 THEN GOTO @BREXIT")
+B("IF K=1 THEN LET W=W-19")
+B("IF K=3 THEN LET W=W-19")
+B("IF K=2 THEN LET W=W+19")
+B("IF K=5 THEN LET W=W+19")
+B("IF W<0 THEN LET W=0")
+LBL("BRREL")
+B("IF USR %d<>0 THEN GOTO @BRREL"%WK)
+B("GOTO @BRSHOW")
+LBL("BREXIT")
+B("GOSUB @REDRAW")
+B("GOTO @MAINLOOP")
+# BRFETCH: OPE SER, send 'B'+BCMD, pull the page via RXSER into the high-RAM buffer,
+# CLO SER. Sets A=status (1=ok), RL=byte count. Buffer sits above RAMTOP.
+LBL("BRFETCH")
+B('LPRINT "OPE SER %d"'%SERBAUD)
+B("LET A=USR %d"%BRG)
+B("IF A=0 THEN GOTO @BRFCLO")
+B("LET RM=PEEK 16388+256*PEEK 16389")
+B("LET BA=RM+256")
+B("LET EN=RM+15872")
+B("POKE EN,170")
+B("POKE BA,85")
+B("IF PEEK EN<>170 THEN LET A=0")
+B("IF PEEK BA<>85 THEN LET A=0")
+B("IF A=0 THEN GOTO @BRFCLO")
+B("POKE %d,BA-256*INT (BA/256)"%RXP)
+B("POKE %d,INT (BA/256)"%(RXP+1))
+B("FAST")
+B("LET RL=USR %d"%RXS)
+B("SLOW")
+LBL("BRFCLO")
+B('LPRINT "CLO SER"')
+B("RETURN")
 # GOUP: go up one directory level (chdir '..', pop path).
 LBL("GOUP")
 B("IF P=0 THEN RETURN")
@@ -752,6 +904,7 @@ B("GOSUB @DRAW")
 B('PRINT AT 3,%d;"J=SET JOYSTICK"'%PCOL)
 B('PRINT AT 5,%d;"S=SERIAL IN"'%PCOL)
 B('PRINT AT 7,%d;"U=UPDATE OS"'%PCOL)
+B('PRINT AT 9,%d;"B=BROWSE WEB"'%PCOL)
 B("RETURN")
 # ACTIVATE: fire on the selected entry - run file / enter dir / go up.
 LBL("ACTIVATE")
