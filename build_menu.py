@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1995"
+VER="V1996"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -588,6 +588,31 @@ emit(0x3A); ref("USCNT"); emit(0x3D); emit(0x32); ref("USCNT")
 jr(None,"USL")
 lbl("USDONE")
 emit(0xCD); ref("RXBYTE"); emit(0x4F); emit(0x06,0x00); emit(0xC9)
+# RXBYTET: receive one byte with a timeout. A=byte, carry CLEAR on success; carry SET on
+# timeout (so the 'N' name query degrades gracefully against zxsvr.exe, which never replies).
+lbl("RXBYTET")
+emit(0x11,0x00,0x40)                             # LD DE,0x4000  (timeout iterations)
+lbl("RXT_L")
+emit(0x01,0xEB,0x00); emit(0xED,0x78); emit(0xCB,0x4F); jr("NZ","RXT_GOT")  # BIT 1 -> data?
+emit(0x1B); emit(0x7A); emit(0xB3); jr("NZ","RXT_L")   # DEC DE; LD A,D; OR E; loop
+emit(0x37); emit(0xC9)                           # SCF; RET  (timeout)
+lbl("RXT_GOT")
+emit(0x01,0xE3,0x00); emit(0xED,0x78); emit(0xB7); emit(0xC9)  # IN A,(C); OR A (clr carry); RET
+# NAMEGET: send 'N', timed-read the name length; if the ESP replies, read the name (ZX81
+# codes) into NMBUF and return its length in BC; on timeout/zero -> BC=0 (caller uses INBOX.P).
+lbl("NAMEGET")
+emit(0x3E,0x4E); emit(0xCD); ref("TXA")          # LD A,'N'; CALL TXA
+emit(0xCD); ref("RXBYTET"); jr("C","NG_NONE")    # timed read len; timeout -> none
+emit(0xA7); jr("Z","NG_NONE")                    # len 0 -> none
+emit(0x32); ref("NMLEN"); emit(0x47)             # LD (NMLEN),A; LD B,A
+emit(0x21); ref("NMBUF")                         # LD HL,NMBUF
+lbl("NG_L")
+emit(0xC5); emit(0xCD); ref("RXBYTE"); emit(0xC1)  # PUSH BC; CALL RXBYTE; POP BC
+emit(0x77); emit(0x23); djnz("NG_L")             # LD (HL),A; INC HL
+emit(0x3A); ref("NMLEN"); emit(0x4F); emit(0x06,0x00); emit(0xC9)  # return len in BC
+lbl("NG_NONE")
+emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)     # LD C,0; LD B,0; RET
+emit(0x00)                                        # alignment pad (keep data refs off 0x76)
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -612,6 +637,9 @@ lbl("USCNT"); emit(0)          # UECHO/URLSEND byte counter
 lbl("URLLEN"); emit(0)         # typed-URL length
 lbl("URLBUF")                  # typed-URL ASCII bytes
 for _ in range(64): emit(0)
+lbl("NMLEN"); emit(0)          # received-filename length
+lbl("NMBUF")                   # received filename (ZX81 codes) for the 'N' verb
+for _ in range(24): emit(0)
 # ROWS: keyboard-matrix row high-bytes (A8..A15 low), in scan order.
 lbl("ROWS")
 for b in (0xFE,0xFD,0xFB,0xF7,0xEF,0xDF,0xBF,0x7F): emit(b)
@@ -669,6 +697,7 @@ RXS=addr("RXSER");RXP=addr("RXPTR");REH=addr("RXEHI")
 UPDQ=addr("UPDQRY");VLO=addr("VLO");VHI=addr("VHI");VERN=int(VER[1:]);WYN=addr("WAITYN")
 BRG=addr("BROWSEGO");BRN=addr("BRENDER");BCMD=addr("BCMD");BLINE=addr("BLINE");BSRC=addr("BSRC");BEND=addr("BEND");BK=addr("BKEY")
 KSC=addr("KSCAN");UEC=addr("UECHO");USND=addr("URLSEND");URLLEN=addr("URLLEN");URLBUF=addr("URLBUF")
+NMG=addr("NAMEGET");NMB=addr("NMBUF");NML=addr("NMLEN")
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 # OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
@@ -897,13 +926,16 @@ B("POKE %d,INT (EN/256)"%REH)
 B('PRINT AT 6,2;"START ZXSVR ON PC"')
 B('PRINT AT 7,2;"(SCREEN BLANKS)"')
 B('LPRINT "OPE SER %d"'%SERBAUD)
+B("LET NL=USR %d"%NMG)                           # ask the server for the filename
 B("FAST")
 B("LET RL=USR %d"%RXS)
 B("SLOW")
 B('LPRINT "CLO SER"')
 B("IF RL=0 THEN GOTO @SERCAN")
-B('PRINT AT 9,2;"GOT ";RL;" BYTES"')
-B('LET F$=">INBOX.P;"+STR$ BA+","+STR$ RL')
+B('IF NL=0 THEN LET N$="INBOX.P"')               # zxsvr.exe / timeout -> default
+B("IF NL>0 THEN GOSUB @SLNAME")                  # ESP gave a name -> build it
+B('PRINT AT 9,2;"SAVED ";N$')
+B('LET F$=">"+N$+";"+STR$ BA+","+STR$ RL')
 B("SAVE F$")
 B("GOTO @SERCAN")
 LBL("SERNOR")
@@ -913,6 +945,13 @@ LBL("SERCAN")
 B("GOSUB @LISTDIR")
 B("GOSUB @REDRAW")
 B("GOTO @MAINLOOP")
+# SLNAME: build N$ from the NMBUF bytes (ZX81 codes) the 'N' verb returned.
+LBL("SLNAME")
+B('LET N$=""')
+B("FOR I=1 TO NL")
+B("LET N$=N$+CHR$ PEEK (%d+I-1)"%NMB)
+B("NEXT I")
+B("RETURN")
 # OSUPDATE (U key): ask the ESP (zxsvr 'U' verb) whether a newer menu.p is published; if
 # so, pull it (RXSER - the ESP has armed its update slot), SAVE it as >MENU.P, and
 # LOAD "MENU.P" to boot the new OSOS (bare LOAD of an auto-run .p = soft reset).
