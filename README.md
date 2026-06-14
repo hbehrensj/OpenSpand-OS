@@ -34,7 +34,8 @@ DIR:/GAMES
   `CONFIG` command) right before the game loads.
 - **Serial program transfer** — send a `.p` straight from a PC (or the
   [osos‑esp32](https://github.com/hbehrensj/osos-esp32) WiFi bridge) over the serial port;
-  it's saved to the SD card as `INBOX.P`, then launched like any other file.
+  it's saved to the SD card under its real filename (the bridge sends it; a bare `zxsvr`
+  server falls back to `INBOX.P`), then launched like any other file.
 - **Auto‑update over WiFi** — with the [osos‑esp32](https://github.com/hbehrensj/osos-esp32)
   bridge, press `U` to pull the latest `menu.p` from this repo's GitHub releases and reboot
   into it.
@@ -106,7 +107,7 @@ bridge stays permanently on the OpenSpand serial header and runs the `zxsvr` ser
 so no PC script is needed:
 
 - **Send a program** — upload a `.p` in the bridge's web UI, then press **`S`** on the ZX81;
-  it pulls it as `INBOX.P` over WiFi.
+  it pulls it over WiFi and saves it under its original filename (e.g. `CHESS.P`).
 - **Auto‑update OSOS** — press **`U`**. The ZX81 asks the bridge (zxsvr `'U'` verb, carrying
   its own version) whether a newer `menu.p` is published here on GitHub; if so it pulls it,
   saves it as `MENU.P`, and `LOAD`s it — booting the new version. The bridge mirrors the
