@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1993"
+VER="V1994"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -477,6 +477,7 @@ emit(0xCB,0x5F); jr("Z","BK_CLR")                        # fire -> clear number
 emit(0x01,0xFE,0xBF); emit(0xED,0x78); emit(0xCB,0x47); jr("Z","BK_ENT")  # ENTER
 emit(0x01,0xFE,0xFB); emit(0xED,0x78); emit(0xCB,0x47); jr("Z","BK_QT")   # Q
 emit(0x01,0xFE,0x7F); emit(0xED,0x78); emit(0xCB,0x47); jr("Z","BK_DN")   # SPACE -> page down
+emit(0x01,0xFE,0xDF); emit(0xED,0x78); emit(0xCB,0x5F); jr("Z","BK_URL")  # U -> URL editor
 emit(0x01,0xFE,0xF7); emit(0xED,0x78)                    # keys 1,2,3,4,5
 emit(0xCB,0x47); jr("Z","BK_D1")
 emit(0xCB,0x4F); jr("Z","BK_D2")
@@ -496,6 +497,7 @@ lbl("BK_BK");  emit(0x0E,4);  jr(None,"BKRET")
 lbl("BK_CLR"); emit(0x0E,6);  jr(None,"BKRET")
 lbl("BK_ENT"); emit(0x0E,3);  jr(None,"BKRET")
 lbl("BK_QT");  emit(0x0E,5);  jr(None,"BKRET")
+lbl("BK_URL"); emit(0x0E,7);  jr(None,"BKRET")
 lbl("BK_D0");  emit(0x0E,10); jr(None,"BKRET")
 lbl("BK_D1");  emit(0x0E,11); jr(None,"BKRET")
 lbl("BK_D2");  emit(0x0E,12); jr(None,"BKRET")
@@ -507,6 +509,85 @@ lbl("BK_D7");  emit(0x0E,17); jr(None,"BKRET")
 lbl("BK_D8");  emit(0x0E,18); jr(None,"BKRET")
 lbl("BK_D9");  emit(0x0E,19); jr(None,"BKRET")
 lbl("BKRET"); emit(0x06,0x00); emit(0xC9)                # LD B,0; RET
+# KSCAN: scan the keyboard matrix -> ASCII in BC (no INKEY$). 0=none, 13=ENTER,
+# 8=DELETE (SHIFT+0); SHIFT gives /(V) :(Z) -(J) ?(C) =(L). Letters/digits/'.' plain.
+lbl("KSCAN")
+emit(0x01,0xFE,0xFE); emit(0xED,0x78)            # LD BC,0xFEFE; IN A,(C)  (shift row)
+emit(0x2F); emit(0xE6,0x01); emit(0x5F)          # CPL; AND 1; LD E,A  (E=shift)
+emit(0x21); ref("ROWS")                          # LD HL,ROWS
+emit(0x16,0x00)                                  # LD D,0  (row index)
+emit(0x3E,0x1E); emit(0x32); ref("KMASK")        # LD A,0x1E; LD (KMASK),A  (row0: skip shift)
+lbl("KS_ROW")
+emit(0x46)                                       # LD B,(HL)  port hi
+emit(0x0E,0xFE); emit(0xED,0x78)                 # LD C,0xFE; IN A,(C)
+emit(0x2F); emit(0x4F)                           # CPL; LD C,A  (pressed bits in C)
+emit(0x3A); ref("KMASK"); emit(0xA1)             # LD A,(KMASK); AND C
+jr("NZ","KS_FOUND")
+emit(0x3E,0x1F); emit(0x32); ref("KMASK")        # rows 1-7 mask 0x1F
+emit(0x23); emit(0x14)                           # INC HL; INC D
+emit(0x7A); emit(0xFE,0x08); jr("C","KS_ROW")    # LD A,D; CP 8; loop
+emit(0x0E,0x00); emit(0x06,0x00); emit(0xC9)     # none
+lbl("KS_FOUND")
+emit(0x06,0x00)                                  # LD B,0  (bit number)
+lbl("KS_BIT")
+emit(0x1F); jr("C","KS_GOT")                     # RRA; carry=lowest set bit
+emit(0x04); jr(None,"KS_BIT")                    # INC B; loop
+lbl("KS_GOT")
+emit(0x7A); emit(0x87); emit(0x87); emit(0x82); emit(0x80)  # A = D*5 + B (index)
+emit(0xFE,0x1E); jr("Z","KS_ENT")                # index 30 = ENTER
+emit(0x4F)                                       # LD C,A  (index)
+emit(0x7B); emit(0xA7); jr("Z","KS_PLAIN")       # no shift -> plain
+emit(0x79); emit(0xFE,0x04); jr("Z","KS_SLASH")  # V -> '/'
+emit(0xFE,0x01); jr("Z","KS_COLON")              # Z -> ':'
+emit(0xFE,0x21); jr("Z","KS_MINUS")              # J -> '-'
+emit(0xFE,0x03); jr("Z","KS_QUES")               # C -> '?'
+emit(0xFE,0x1F); jr("Z","KS_EQ")                 # L -> '='
+emit(0xFE,0x14); jr("Z","KS_DEL")                # 0 -> delete
+lbl("KS_PLAIN")
+emit(0x79); emit(0xE5)                           # LD A,C(index); PUSH HL
+emit(0x21); ref("KTAB")                          # LD HL,KTAB
+emit(0x85); emit(0x6F); jr("NC","KSP1"); emit(0x24)  # ADD A,L; LD L,A; JR NC; INC H
+lbl("KSP1")
+emit(0x7E); emit(0xE1); emit(0x4F); emit(0x06,0x00); emit(0xC9)  # LD A,(HL); POP HL; LD C,A; LD B,0; RET
+lbl("KS_ENT");   emit(0x0E,13); emit(0x06,0x00); emit(0xC9)
+lbl("KS_SLASH"); emit(0x0E,47); emit(0x06,0x00); emit(0xC9)
+lbl("KS_COLON"); emit(0x0E,58); emit(0x06,0x00); emit(0xC9)
+lbl("KS_MINUS"); emit(0x0E,45); emit(0x06,0x00); emit(0xC9)
+lbl("KS_QUES");  emit(0x0E,63); emit(0x06,0x00); emit(0xC9)
+lbl("KS_EQ");    emit(0x0E,61); emit(0x06,0x00); emit(0xC9)
+lbl("KS_DEL");   emit(0x0E,8);  emit(0x06,0x00); emit(0xC9)
+# UECHO: render URLBUF (URLLEN ascii bytes, then spaces) to DFILE rows 2-3 (ASCII->ZX81).
+lbl("UECHO")
+emit(0x2A,0x0C,0x40)                             # LD HL,(16396)
+emit(0x11,67,0); emit(0x19); emit(0xEB)          # LD DE,67; ADD HL,DE; EX DE,HL (DE=row2col0)
+emit(0x21); ref("URLBUF")                        # LD HL,URLBUF
+emit(0x3A); ref("URLLEN"); emit(0x32); ref("USCNT")  # USCNT = URLLEN
+emit(0x06,0x02)                                  # LD B,2 rows
+lbl("UEROW")
+emit(0x0E,0x20)                                  # LD C,32
+lbl("UECOL")
+emit(0x3A); ref("USCNT"); emit(0xA7); jr("Z","UESPACE")  # out of url -> space
+emit(0x3D); emit(0x32); ref("USCNT")             # DEC USCNT
+emit(0x7E); emit(0x23); emit(0xCD); ref("CONV")  # LD A,(HL); INC HL; CONV
+jr(None,"UEPUT")
+lbl("UESPACE"); emit(0xAF)                       # XOR A (space)
+lbl("UEPUT")
+emit(0x12); emit(0x13); emit(0x0D); jr("NZ","UECOL")  # LD(DE),A; INC DE; DEC C
+emit(0x13); djnz("UEROW")                        # INC DE (terminator); next row
+emit(0xC9)
+# URLSEND: send 'G' + URLLEN + the URLBUF bytes, read 1 status byte -> BC.
+lbl("URLSEND")
+emit(0x3E,0x47); emit(0xCD); ref("TXA")          # 'G'
+emit(0x3A); ref("URLLEN"); emit(0xCD); ref("TXA")  # length
+emit(0x3A); ref("URLLEN"); emit(0x32); ref("USCNT")
+emit(0x21); ref("URLBUF")
+lbl("USL")
+emit(0x3A); ref("USCNT"); emit(0xA7); jr("Z","USDONE")
+emit(0x7E); emit(0xCD); ref("TXA"); emit(0x23)   # send (HL); HL preserved; INC HL
+emit(0x3A); ref("USCNT"); emit(0x3D); emit(0x32); ref("USCNT")
+jr(None,"USL")
+lbl("USDONE")
+emit(0xCD); ref("RXBYTE"); emit(0x4F); emit(0x06,0x00); emit(0xC9)
 # data
 lbl("sptr"); emit(0,0)
 lbl("TCELL"); emit(0)
@@ -526,6 +607,21 @@ lbl("BCMD"); emit(0)            # browser command byte (0=reload, 1..N=link, 255
 lbl("BLINE"); emit(0,0)        # render line-scroll offset
 lbl("BSRC"); emit(0,0)         # text buffer start (=BA)
 lbl("BEND"); emit(0,0)         # text buffer end (=BA+RL)
+lbl("KMASK"); emit(0)          # KSCAN row mask scratch
+lbl("USCNT"); emit(0)          # UECHO/URLSEND byte counter
+lbl("URLLEN"); emit(0)         # typed-URL length
+lbl("URLBUF")                  # typed-URL ASCII bytes
+for _ in range(64): emit(0)
+# ROWS: keyboard-matrix row high-bytes (A8..A15 low), in scan order.
+lbl("ROWS")
+for b in (0xFE,0xFD,0xFB,0xF7,0xEF,0xDF,0xBF,0x7F): emit(b)
+# KTAB: matrix index (row*5+bit) -> unshifted ASCII. Rows: FEFE=SHIFT,Z,X,C,V /
+# FDFE=A,S,D,F,G / FBFE=Q,W,E,R,T / F7FE=1..5 / EFFE=0,9,8,7,6 / DFFE=P,O,I,U,Y /
+# BFFE=ENTER,L,K,J,H / 7FFE=SPACE,.,M,N,B. ENTER(30) handled before the lookup.
+_ktab=[0,90,88,67,86, 65,83,68,70,71, 81,87,69,82,84, 49,50,51,52,53,
+       48,57,56,55,54, 80,79,73,85,89, 13,76,75,74,72, 32,46,77,78,66]
+lbl("KTAB")
+for b in _ktab: emit(b)
 # CONVTAB: ASCII 32..95 -> ZX81 char code (CONV handles A-Z/0-9 by range; this covers
 # space + punctuation; unmappable -> 0/space; '['/']' -> '('/')' since ZX81 has no brackets).
 def _a2z(c):
@@ -572,6 +668,7 @@ PMC=addr("PANELMC");PCLR=addr("PANELCLR");PBUF=addr("pbuf");NAVA=addr("NAV")
 RXS=addr("RXSER");RXP=addr("RXPTR");REH=addr("RXEHI")
 UPDQ=addr("UPDQRY");VLO=addr("VLO");VHI=addr("VHI");VERN=int(VER[1:]);WYN=addr("WAITYN")
 BRG=addr("BROWSEGO");BRN=addr("BRENDER");BCMD=addr("BCMD");BLINE=addr("BLINE");BSRC=addr("BSRC");BEND=addr("BEND");BK=addr("BKEY")
+KSC=addr("KSCAN");UEC=addr("UECHO");USND=addr("URLSEND");URLLEN=addr("URLLEN");URLBUF=addr("URLBUF")
 BD=addr("BLITDAT");BT=addr("BLITTIM")
 rem="".join("[%d]"%b for b in out)
 # OSOS splash logo: solid block letters at ~2x resolution. Each letter is a 12x12-px
@@ -891,6 +988,7 @@ B("IF K>=10 THEN LET L=L*10+K-10")
 B("IF K>=10 THEN GOTO @BRSTAT")
 B("IF K=3 THEN GOTO @BRGO")
 B("IF K=4 THEN GOTO @BRBACK")
+B("IF K=7 THEN GOTO @BRURL")
 B("IF K=2 THEN LET W=W-19")
 B("IF K=1 THEN LET W=W+19")
 B("IF W<0 THEN LET W=0")
@@ -916,6 +1014,61 @@ B("GOTO @BRSHOW")
 LBL("BREXIT")
 B("GOSUB @REDRAW")
 B("GOTO @MAINLOOP")
+# BRURL: type a URL on the ZX81 keyboard (matrix scan, no INKEY$). ENTER sends it to
+# the ESP ('G' verb) which fetches+renders; then we pull and show the page.
+LBL("BRURL")
+B("CLS")
+B('PRINT AT 0,0;"TYPE URL  ENTER=GO"')
+B('PRINT AT 5,0;"/=SH-V :=SH-Z -=SH-J"')
+B('PRINT AT 6,0;"DEL=SH-0"')
+B("POKE %d,0"%URLLEN)
+B("LET X=USR %d"%UEC)
+LBL("BRUKEY")
+B("LET K=USR %d"%KSC)
+B("IF K=0 THEN GOTO @BRUKEY")
+LBL("BRUREL")
+B("IF USR %d<>0 THEN GOTO @BRUREL"%KSC)
+B("IF K=13 THEN GOTO @BRUGO")
+B("IF K=8 THEN GOTO @BRUDEL")
+B("IF K<32 THEN GOTO @BRUKEY")
+B("LET M=PEEK %d"%URLLEN)
+B("IF M>59 THEN GOTO @BRUKEY")
+B("POKE %d+M,K"%URLBUF)
+B("POKE %d,M+1"%URLLEN)
+LBL("BRUSHOW")
+B("LET X=USR %d"%UEC)
+B("GOTO @BRUKEY")
+LBL("BRUDEL")
+B("LET M=PEEK %d"%URLLEN)
+B("IF M>0 THEN POKE %d,M-1"%URLLEN)
+B("GOTO @BRUSHOW")
+LBL("BRUGO")
+B("IF PEEK %d=0 THEN GOTO @BRUKEY"%URLLEN)
+B("CLS")
+B('PRINT AT 11,8;"LOADING..."')
+B('LPRINT "OPE SER %d"'%SERBAUD)
+B("LET A=USR %d"%USND)
+B("IF A=0 THEN GOTO @BRUGC")
+B("LET RM=PEEK 16388+256*PEEK 16389")
+B("LET BA=RM+256")
+B("LET EN=RM+15872")
+B("POKE EN,170")
+B("POKE BA,85")
+B("IF PEEK EN<>170 THEN LET A=0")
+B("IF PEEK BA<>85 THEN LET A=0")
+B("IF A=0 THEN GOTO @BRUGC")
+B("POKE %d,BA-256*INT (BA/256)"%RXP)
+B("POKE %d,INT (BA/256)"%(RXP+1))
+B("FAST")
+B("LET RL=USR %d"%RXS)
+B("SLOW")
+LBL("BRUGC")
+B('LPRINT "CLO SER"')
+B("IF A=0 THEN GOTO @BREXIT")
+B("GOSUB @BRSETBUF")
+B("LET L=0")
+B("LET W=0")
+B("GOTO @BRSHOW")
 LBL("BRSETBUF")
 B("POKE %d,BA-256*INT (BA/256)"%BSRC)
 B("POKE %d,INT (BA/256)"%(BSRC+1))
