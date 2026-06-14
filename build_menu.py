@@ -27,7 +27,7 @@ LD A,E=0x7B (NOT 0x48/0x7A).
 Usage: python3 build_menu.py [--build]
 """
 SW=14; MAXE=100; V=17; BASE=16514; CLKDIV=50; PCOL=16; PW=32-PCOL; PR=12; RPTN=1; HKDIV=24; SERBAUD=38400; RXIDL=8192
-VER="V1994"
+VER="V1995"
 prog=[]; labels={}
 def emit(*bs):
     for b in bs: prog.append(("b",b&0xFF))
@@ -975,7 +975,7 @@ B("POKE %d,W-256*INT (W/256)"%BLINE)
 B("POKE %d,INT (W/256)"%(BLINE+1))
 B("LET X=USR %d"%BRN)
 LBL("BRSTAT")
-B('PRINT AT 21,0;"LINK ";L;" ENT=GO Q=X    ";')
+B('PRINT AT 21,0;"LINK ";L;" ENT=GO U=URL Q=X  ";')
 LBL("BRKEY")
 B("LET K=USR %d"%BK)
 B("IF K=0 THEN GOTO @BRKEY")

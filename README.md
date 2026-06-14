@@ -49,9 +49,10 @@ DIR:/GAMES
 | Page up / down | `5` / `8` (or stick left / right) |
 | Run program / enter folder | `0` (or fire) |
 | Up one level | select the `..` entry |
-| Configure the selected game's keys | `C` |
+| Configure the selected game's joystick keys | `J` |
 | Receive a `.p` over serial | `S` |
 | Update OSOS over WiFi (osos‑esp32 bridge) | `U` |
+| Browse the web (osos‑esp32 bridge) | `B` |
 | Quit launcher | `Q` |
 
 Works with an Atari‑compatible joystick on the OpenSpand game port, or with the
@@ -121,6 +122,27 @@ Bump `VER="V…"` in `build_menu.py`, rebuild, commit the new `menu.p`, then pus
 tag (`git tag -a v1991 && git push origin v1991`). The release workflow attaches `menu.p` +
 a generated `version.json` to the GitHub Release; the bridge mirrors it and the `U` key
 installs it.
+
+## Web browser (osos‑esp32 bridge)
+
+A Lynx‑style text web browser: the [osos‑esp32](https://github.com/hbehrensj/osos-esp32)
+bridge fetches a URL, renders the HTML to ZX81 text (uppercase, 32 columns, numbered `(N)`
+link markers), and the ZX81 displays it. Press **`B`** in the launcher to enter it.
+
+| In the browser | Key / Joystick |
+|----------------|----------------|
+| Scroll a page | stick up / down, or `SPACE` (down) |
+| Follow a link | type its number, then `ENTER` |
+| Back (previous page) | stick **left** |
+| Clear the typed number | fire |
+| **Type a URL** | `U`, then type it and `ENTER` |
+| Exit to the launcher | `Q` |
+
+The URL editor reads the keyboard **matrix** (not `INKEY$`, which the joystick‑injection
+mode blocks). Most characters are direct; the URL symbols are shifted: **`/` = SHIFT+V**,
+**`:` = SHIFT+Z**, **`-` = SHIFT+J**, `?` = SHIFT+C, `=` = SHIFT+L, and **DELETE = SHIFT+0**.
+You can also set the entry URL from the bridge's web UI. JavaScript‑rendered content can't be
+shown (only what's in the served HTML), and non‑ASCII letters (æ ø å …) render as spaces.
 
 ## Install
 
